@@ -3,3 +3,7 @@ __pycache__/
 *.bak.*
 .env
 .DS_Store
+build/
+dist/
+*.egg-info/
+.venv/

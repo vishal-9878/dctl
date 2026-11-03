@@ -48,10 +48,10 @@ It is two files: a Bash CLI (`dctl`) and a web UI (`dctl-ui`) written in Python 
 ## Requirements
 
 **On your machine**
-- Linux or macOS
-- Python **3.8+** (standard library only, nothing to `pip install`)
-- OpenSSH client (8.4+ if you want "add server with password")
-- Bash, and optionally [`fzf`](https://github.com/junegunn/fzf) for the CLI's interactive picker
+- Linux, macOS, or Windows 10/11 (WSL recommended, see below)
+- Python **3.8+** (standard library only, no other dependencies)
+- OpenSSH client (8.4+ if you want "add server with password", which needs Linux or macOS)
+- For the `dctl` CLI: Bash, and optionally [`fzf`](https://github.com/junegunn/fzf) for the interactive picker
 - A modern browser. The web terminal loads `xterm.js` from `cdn.jsdelivr.net`.
 
 **On each server**
@@ -63,15 +63,48 @@ It is two files: a Bash CLI (`dctl`) and a web UI (`dctl-ui`) written in Python 
 
 ## Install
 
-```bash
-git clone https://github.com/<your-username>/dctl.git
-cd dctl
-chmod +x dctl dctl-ui
+You get two commands: `dctl-ui` (web dashboard) and `dctl` (terminal CLI). No sudo or admin rights are needed.
 
-# optional: put it on your PATH
-mkdir -p ~/.local/bin
-ln -s "$PWD/dctl"    ~/.local/bin/dctl
-ln -s "$PWD/dctl-ui" ~/.local/bin/dctl-ui
+### Linux and macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.ps1 | iex
+```
+
+> On native Windows the **web terminal** and the bash **`dctl` CLI** are not available, and each action opens a new SSH connection (Windows OpenSSH has no connection sharing). Everything else in the dashboard works.
+> For the full experience, install inside **WSL** with the Linux command above.
+
+### With pipx (any OS)
+
+```bash
+pipx install "https://github.com/YOUR-GITHUB-USERNAME/dctl/archive/refs/heads/main.tar.gz"
+```
+
+The installers use pipx when it is available. Otherwise they create a private virtualenv (`~/.local/share/dctl` or `%LOCALAPPDATA%\dctl`), so your system Python is not touched.
+
+### Update / uninstall
+
+Run the install command again to update. To uninstall:
+
+```bash
+pipx uninstall dctl                     # if installed with pipx
+rm -rf ~/.local/share/dctl ~/.local/bin/dctl ~/.local/bin/dctl-ui   # Linux/macOS installer
+```
+
+On Windows, delete `%LOCALAPPDATA%\dctl` and remove its `bin` folder from your user PATH.
+
+### Run from a clone (for development)
+
+```bash
+git clone https://github.com/YOUR-GITHUB-USERNAME/dctl.git
+cd dctl
+./dctl-ui        # or: ./dctl ls
 ```
 
 ## Quick start
@@ -81,7 +114,7 @@ ln -s "$PWD/dctl-ui" ~/.local/bin/dctl-ui
 2. Start the web UI:
 
    ```bash
-   ./dctl-ui
+   dctl-ui
    ```
 
    It opens `http://127.0.0.1:8765` in your browser.
