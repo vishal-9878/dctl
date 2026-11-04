@@ -96,3 +96,68 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Signed APT repository on GitHub Pages (gh-pages branch), so Ubuntu users get updates with `apt upgrade`.
+  # Needs the APT_GPG_PRIVATE_KEY secret (packaging/apt/make-key.sh); skipped with a warning without it.
+  apt:
+    name: APT repository (GitHub Pages)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.release.result == 'success' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check signing key
+        id: key
+        run: |
+          if [ -n "$APT_GPG_PRIVATE_KEY" ]; then echo "ok=1" >> "$GITHUB_OUTPUT"
+          else echo "::warning::APT_GPG_PRIVATE_KEY secret is not set, so the APT repository was not updated (see README)."; fi
+      - uses: actions/download-artifact@v4
+        if: steps.key.outputs.ok
+        with:
+          name: deb
+          path: debs
+      - name: Build and publish to gh-pages
+        if: steps.key.outputs.ok
+        run: |
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          packaging/apt/build-repo.sh debs site
+          cd site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "APT repository for ${GITHUB_REF_NAME}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+  # Homebrew cask (Casks/dctl.rb in this repo): bump version + checksums on main.
+  homebrew:
+    name: Homebrew cask
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() && needs.release.result == 'success' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          path: pkgs
+          merge-multiple: true
+      - name: Update Casks/dctl.rb
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          python3 packaging/homebrew/update_cask.py "$VER" pkgs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/dctl.rb
+          if git diff --cached --quiet; then echo "cask already up to date"; exit 0; fi
+          git commit -qm "Homebrew cask: dctl $VER"
+          for i in 1 2 3; do git push -q origin HEAD:main && exit 0; git pull -q --rebase origin main; done
+          exit 1

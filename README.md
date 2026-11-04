@@ -37,13 +37,14 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 
 ### Servers
 - **Web terminal**: a full SSH shell to any server in the browser, with tabs. Minimised terminals stay open.
-- **Files**: browse any folder, then copy a file to the clipboard, view it, or download it. It uses sudo automatically for files you can't read.
+- **Files**: browse any folder; view, copy, download or **edit** a file (with a diff review and backup); **upload** files from your computer (button or drag and drop). It uses sudo automatically, only where you need it.
+- **Protected servers**: mark production servers as protected. Then every change there (restart, stop, delete, edit, upload, cleanup, …) asks you to type the server name first.
 - **Disk cleanup**: shows what is using space (Docker images, build cache, container logs, journald, rotated logs, PM2 logs, big folders) and cleans it with one click, showing how much space was freed.
 - **systemd services**: running and failed services, restart / stop / start, status and journal logs.
 - **Run a command on many servers at once**, with saved commands.
 - **Global search** (`Ctrl K`) over servers, containers, PM2 processes and ports.
 - **Pages and groups**: separate Docker and PM2 pages, with your own groups (Production, Staging, …).
-- Add servers from the UI (host, user, port, key or one-time password), or just use your `~/.ssh/config`.
+- Add servers from the UI (host, user, port, key or one-time password, optional **jump host / bastion**), or just use your `~/.ssh/config`.
 
 ---
 
@@ -87,6 +88,25 @@ Windows uses the Edge WebView2 runtime, which Windows 10/11 already have.
 > - **Windows** may show "Windows protected your PC". Click **More info → Run anyway**.
 > - **macOS** may say the package "cannot be opened". **Right-click the .pkg → Open**, or go to **System Settings → Privacy & Security → Open Anyway**.
 
+### Ubuntu / Debian: APT repository (automatic updates)
+
+```bash
+curl -fsSL https://vishal-9878.github.io/dctl/dctl.gpg | sudo tee /usr/share/keyrings/dctl.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/dctl.gpg] https://vishal-9878.github.io/dctl/apt ./" | sudo tee /etc/apt/sources.list.d/dctl.list
+sudo apt update && sudo apt install dctl
+```
+
+New versions then arrive with `sudo apt upgrade`.
+
+### macOS: Homebrew
+
+```bash
+brew tap vishal-9878/dctl https://github.com/vishal-9878/dctl
+brew install --cask dctl
+```
+
+Update with `brew upgrade --cask dctl`.
+
 ### Install script (no sudo / admin)
 
 #### Linux and macOS
@@ -114,13 +134,14 @@ The installers use pipx when it is available. Otherwise they create a private vi
 
 ### Update / uninstall
 
-To update, install the newer release file (or run the install command again).
+To update: `sudo apt upgrade` (APT repository), `brew upgrade --cask dctl` (Homebrew), or install the newer release file / run the install command again.
 
 To uninstall:
 
 | Installed with | Uninstall |
 |---|---|
-| `.deb` | `sudo apt remove dctl` |
+| `.deb` or APT repository | `sudo apt remove dctl` (APT repository: also `sudo rm /etc/apt/sources.list.d/dctl.list /usr/share/keyrings/dctl.gpg`) |
+| Homebrew | `brew uninstall --cask dctl` |
 | Windows setup `.exe` | Settings → Apps → **dctl** → Uninstall |
 | macOS `.pkg` | `sudo rm -rf /Applications/dctl.app /usr/local/lib/dctl /usr/local/bin/dctl /usr/local/bin/dctl-ui && sudo pkgutil --forget io.github.vishal-9878.dctl` |
 | pipx | `pipx uninstall dctl` |
@@ -204,6 +225,7 @@ Files in `~/.config/dctl/`:
 | `servers` | Optional list of SSH hosts, one per line |
 | `servers.json` | Servers added from the UI (mode `600`) |
 | `layout.json` | Which server is on which page and group, and PM2 user choices |
+| `protected.json` | Servers marked as protected |
 | `commands.json` | Saved commands for "Run on many servers" |
 
 ---
@@ -221,6 +243,7 @@ Files in `~/.config/dctl/`:
 - **sudo and SSH passwords are kept in memory only** and are never written to disk. They are forgotten when dctl-ui stops.
 - Nothing is installed or left running on your servers.
 - Destructive actions ask for confirmation. Deleting volumes, or many items at once, requires typing a word or the item's name.
+- On **protected** servers, every change needs the server name typed first. The check is done by the dctl backend, not only by the page.
 - dctl can do anything your SSH user (and its sudo rights) can do. Treat access to your machine running dctl-ui like access to your servers.
 
 To use the UI from another computer, use an SSH tunnel instead of exposing the port:
@@ -240,6 +263,7 @@ ssh -L 8765:127.0.0.1:8765 your-workstation
 | "sudo here does not allow running a shell" | The server forbids shells through sudo. dctl works around it; use `sudo` inside commands you run yourself. |
 | Terminal doesn't open | dctl must be able to reach `cdn.jsdelivr.net` to load xterm.js. |
 | App opens in the browser instead of its own window | Linux: install `gir1.2-webkit2-4.1` and `python3-gi` (the `.deb` does this). Windows: install the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
+| Server behind a bastion / jump host | When adding it, fill in **Jump host** (a server already in dctl, a `Host` from `~/.ssh/config`, or `user@host:port`). `ssh <jump host>` must work without a password. |
 | PM2 of another user is locked | Your user needs `sudo -u <that user>` rights, or the sudo password. |
 
 ---
@@ -258,6 +282,19 @@ GitHub Actions builds all installers (`.github/workflows/release.yml`). To publi
 
 The workflow builds the `.deb` on Ubuntu, the setup `.exe` on Windows (PyInstaller + Inno Setup) and the `.pkg` on macOS (arm64 and Intel), then attaches them to a GitHub Release.
 You can also start it by hand from the **Actions** tab ("Run workflow") to get the files as artifacts without making a release.
+
+After the release, two more jobs run:
+
+- **APT repository:** builds a signed APT repository from the `.deb` and publishes it on the `gh-pages` branch (GitHub Pages).
+- **Homebrew:** updates `Casks/dctl.rb` on `main` with the new version and checksums. Run `git pull` afterwards.
+
+One-time setup for the APT repository:
+
+1. Create the signing key: `packaging/apt/make-key.sh` (writes `dctl-apt-signing-key.asc`).
+2. GitHub → repo **Settings → Secrets and variables → Actions → New repository secret**: name `APT_GPG_PRIVATE_KEY`, value = the whole file. Then delete the file.
+3. After the next release: **Settings → Pages → Build and deployment**: *Deploy from a branch*, branch `gh-pages`, folder `/ (root)`.
+
+Without the secret, the APT job is skipped with a warning; everything else still works.
 
 To build the `.deb` locally: `packaging/build-deb.sh` (writes to `dist/`).
 

@@ -71,6 +71,36 @@ def save_added(lst):
     os.replace(tmp, SERVERS_JSON)
 
 
+PROTECT_JSON = os.path.join(CONF, "protected.json")   # servers that need the name typed before any change
+
+
+def protected():
+    try:
+        return set(json.load(open(PROTECT_JSON)))
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def save_protected(names):
+    os.makedirs(CONF, exist_ok=True)
+    tmp = PROTECT_JSON + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(names), f, indent=2)
+    os.replace(tmp, PROTECT_JSON)
+
+
+class Protected(Exception):
+    def __init__(self, server, what):
+        super().__init__(f"{server} is a protected server")
+        self.server, self.what = server, what
+
+
+def guard(d, server, what):
+    """Protected servers: the UI must send the server name typed by the user (confirm_server) for any change."""
+    if server in protected() and server not in (d.get("confirm_server") or "").split(","):
+        raise Protected(server, what)
+
+
 def servers():
     env = os.environ.get("DCTL_SERVERS")
     if env:
@@ -93,8 +123,30 @@ def servers():
     return out
 
 
-def target_for(a):
-    t = ["-p", str(a.get("port") or 22), "-o", "StrictHostKeyChecking=accept-new"]
+JUMP_RE = re.compile(r"(?:([A-Za-z0-9._@\\-]+)@)?([A-Za-z0-9._-]+)(?::(\d{1,5}))?")
+
+
+def _jump_opts(jump, depth=0):
+    """ssh options to reach a server through a jump host (bastion). `jump` is a server added in dctl,
+    a Host from ~/.ssh/config, or [user@]host[:port]. Always non-interactive (BatchMode), so a password
+    typed for the target is never offered to the jump host."""
+    if not jump:
+        return []
+    if depth > 3:
+        raise RemoteError("jump host chain is too long (max 3)")
+    a = next((x for x in added_servers() if x["name"] == jump), None)
+    hop = target_for(a, depth + 1) if a else None
+    if hop is None:
+        m = JUMP_RE.fullmatch(jump)
+        if not m:
+            raise RemoteError(f"bad jump host: {jump}")
+        hop = (["-l", m[1]] if m[1] else []) + (["-p", m[3]] if m[3] else []) + [m[2]]
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-W", "%h:%p"] + [x.replace("%", "%%") for x in hop]
+    return ["-o", "ProxyCommand=" + (subprocess.list2cmdline(argv) if IS_WIN else shlex.join(argv))]
+
+
+def target_for(a, depth=0):
+    t = _jump_opts(a.get("jump"), depth) + ["-p", str(a.get("port") or 22), "-o", "StrictHostKeyChecking=accept-new"]
     if a.get("key"):
         t += ["-i", os.path.expanduser(a["key"]), "-o", "IdentitiesOnly=yes"]
     if a.get("user"):
@@ -112,7 +164,8 @@ def target(server):
 def host_of(server):
     for a in added_servers():
         if a["name"] == server:
-            return f'{a.get("user") or ""}@{a["host"]}' + ("" if int(a.get("port") or 22) == 22 else f':{a["port"]}')
+            return (f'{a.get("user") or ""}@{a["host"]}' + ("" if int(a.get("port") or 22) == 22 else f':{a["port"]}')
+                    + (f' via {a["jump"]}' if a.get("jump") else ""))
     try:
         kv = {}
         for l in subprocess.run(["ssh", "-G", server], capture_output=True, text=True, timeout=5).stdout.splitlines():
@@ -164,25 +217,28 @@ def run(server, script, elevate=False, stdin=None, timeout=60):
                       "Ask the admin to add you to the 'docker' group or give sudo access.")
 
 
-def srun(server, script, timeout=90, lazy=False, data=b""):
-    """Run script as the normal user; inside it, $S is a sudo prefix for single commands and $DK is docker
-    (with sudo if needed). Works on servers whose sudoers forbid shells (!/bin/sh) - only plain commands get sudo."""
+def _sudo_pre(server, lazy=False):
+    """Shell preamble that sets $S (a sudo prefix, or empty) plus the stdin bytes it needs (the password line)."""
     if INFO.get(server, {}).get("sudo") is None:
         probe(server)
-    mode, stdin = INFO.get(server, {}).get("sudo"), None
+    mode = INFO.get(server, {}).get("sudo")
     pw = SUDO_PW.get(server)
     if mode == "pass" and pw is None:
         if not lazy:
             raise NeedSudo(server)
         mode = None          # sudo not needed for this call; run without it
     if mode == "nopass":
-        pre = 'S="sudo -n"; '
-    elif mode == "pass":
-        pre = ('IFS= read -r P; printf "%s\\n" "$P" | sudo -S -p "" -v 2>/dev/null; unset P; '
-               'if sudo -n true 2>/dev/null; then S="sudo -n"; else echo @@SUDOFAIL; S=; fi; ')
-        stdin = (pw + "\n").encode()
-    else:
-        pre = 'S=; '
+        return 'S="sudo -n"; ', None
+    if mode == "pass":
+        return ('IFS= read -r P; printf "%s\\n" "$P" | sudo -S -p "" -v 2>/dev/null; unset P; '
+                'if sudo -n true 2>/dev/null; then S="sudo -n"; else echo @@SUDOFAIL; S=; fi; '), (pw + "\n").encode()
+    return 'S=; ', None
+
+
+def srun(server, script, timeout=90, lazy=False, data=b""):
+    """Run script as the normal user; inside it, $S is a sudo prefix for single commands and $DK is docker
+    (with sudo if needed). Works on servers whose sudoers forbid shells (!/bin/sh) - only plain commands get sudo."""
+    pre, stdin = _sudo_pre(server, lazy)
     pre += 'if docker info </dev/null >/dev/null 2>&1; then DK=docker; else DK="$S docker"; fi; '
     if data:
         stdin = (stdin or b"") + data
@@ -301,6 +357,7 @@ HOSTS = {}
 def server_list():
     names = servers()
     added = {a["name"] for a in added_servers()}
+    prot = protected()
     with LOCK:
         counts = {}
         for (s, _), c in CONTAINERS.items():
@@ -310,7 +367,7 @@ def server_list():
         if s not in HOSTS:
             HOSTS[s] = host_of(s)
         out.append({"name": s, "host": HOSTS[s], "added": s in added, "count": counts.get(s),
-                    "unlocked": s in SUDO_PW, **INFO.get(s, {"state": "unknown"})})
+                    "unlocked": s in SUDO_PW, "protected": s in prot, **INFO.get(s, {"state": "unknown"})})
     return out
 
 
@@ -589,15 +646,27 @@ def r_server_add(d):
         raise RemoteError("invalid user name")
     if key and not os.path.isfile(os.path.expanduser(key)):
         raise RemoteError(f"key file not found on this computer: {key}")
+    jump = d.get("jump", "").strip()
+    if jump and not (any(a["name"] == jump for a in added_servers()) or JUMP_RE.fullmatch(jump)):
+        raise RemoteError("Jump host: use a server name from dctl or ~/.ssh/config, or user@host:port")
+    if jump == name:
+        raise RemoteError("a server can't be its own jump host")
     entry = {"name": name, "host": host, "user": user, "port": port, "key": key}
+    if jump:
+        entry["jump"] = jump
     tgt = target_for(entry)
     if pw:
         install_key(tgt, pw, ensure_pubkey(key or None))
     p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ControlMaster=no",
                         "-o", "ControlPath=none"] + tgt + ["true"], capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
-        last = (p.stderr.strip().splitlines() or ["ssh failed"])[-1]
+        lines = p.stderr.strip().splitlines() or ["ssh failed"]
+        last = lines[-1]
+        if jump and len(lines) > 1 and re.search(r"UNKNOWN port|kex_exchange_identification|closed by remote host", last):
+            last = f"jump host {jump}: {lines[-2]}"          # the error came from the jump connection
         hint = "" if pw else " — if this server uses a password, choose 'Password' so dctl can install your SSH key"
+        if jump:
+            hint += f" (check that `ssh {jump}` works without a password)"
         raise RemoteError(f"could not connect: {last}{hint}")
     lst = added_servers(); lst.append(entry); save_added(lst)
     probe(name)
@@ -612,6 +681,9 @@ def r_server_remove(d):
     lst = added_servers()
     if not any(a["name"] == name for a in lst):
         raise RemoteError("only servers added from this UI can be removed here (others come from ~/.ssh/config)")
+    users = [a["name"] for a in lst if a.get("jump") == name]
+    if users:
+        raise RemoteError(f"{name} is the jump host for {', '.join(users)} - forget those first")
     save_added([a for a in lst if a["name"] != name])
     with LAYOUT_LOCK:
         lay = load_layout()
@@ -619,6 +691,9 @@ def r_server_remove(d):
             for pg in PAGES:
                 _detach(lay[pg], name)
             save_layout(lay)
+    p = protected()
+    if name in p:
+        p.discard(name); save_protected(p)
     INFO.pop(name, None); SUDO_PW.pop(name, None); HOSTS.pop(name, None)
     with LOCK:
         for k in [k for k in CONTAINERS if k[0] == name]:
@@ -668,6 +743,7 @@ def r_save(d):
     tmp = d["tmp"]
     if not re.fullmatch(r"/tmp/dctl\.[A-Za-z0-9]+", tmp or ""):
         raise RemoteError("bad temp file")
+    guard(d, c["server"], f"save {path}")
     script = (f'f={q(path)}; t={q(tmp)}; '
               'if [ "$(id -u)" != 0 ] && { [ ! -w "$f" ] || [ ! -r "$f" ] || [ ! -w "$(dirname "$f")" ]; }; then exit 77; fi; '
               f'[ "$(sha256sum "$f" | cut -d" " -f1)" = {q(d["sha"])} ] || exit 75; '
@@ -696,6 +772,7 @@ def r_action(d):
     c = get_c(d); a = d["action"]
     if a not in ("restart", "stop", "start"):
         raise RemoteError("bad action")
+    guard(d, c["server"], f"{a} container {c['name']}")
     return out_of(*drun(c["server"], f"$D {a} {q(c['name'])}", timeout=180))
 
 
@@ -706,6 +783,7 @@ def r_remove(d):
         raise RemoteError("confirmation name does not match")
     if c["running"] and not d.get("force"):
         raise RemoteError("container is running - stop it first or tick 'force'")
+    guard(d, c["server"], f"remove container {c['name']}")
     flags = (" -f" if d.get("force") else "") + (" -v" if d.get("volumes") else "")
     rc, out, err = dk(c["server"], f"$DK rm{flags} {q(c['name'])} 2>&1")
     if rc == 0:
@@ -721,6 +799,8 @@ def r_bulk(d):
     items = [get_c(x) for x in (d.get("items") or [])[:300]]
     if not items:
         raise RemoteError("nothing selected")
+    for sv in dict.fromkeys(c["server"] for c in items):
+        guard(d, sv, f"{a} {sum(c['server'] == sv for c in items)} container(s)")
     if a == "remove":
         if d.get("confirm") != "delete":
             raise RemoteError("type delete to confirm")
@@ -866,6 +946,7 @@ def r_dres_rm(d):
         raise RemoteError("unknown server")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@<>-]{0,300}", ident) or "<none>" in ident:
         raise RemoteError("bad name")
+    guard(d, s, f"delete {str(kind).rstrip('s')} {ident}")
     if kind == "images":
         cmd = "$DK rmi " + q(ident)
     elif kind == "volumes":
@@ -888,6 +969,7 @@ def r_dres_bulk(d):
         raise RemoteError("unknown server")
     if not ids:
         raise RemoteError("nothing selected")
+    guard(d, s, f"delete {len(ids)} {kind}")
     if d.get("confirm") != "delete":
         raise RemoteError("type delete to confirm")
     for i in ids:
@@ -921,6 +1003,8 @@ def r_compose(d):
     p = compose_prefix(c)
     cmd = {"up": f"{p} up -d", "pull": f"{p} pull && $C -p {q(c['project'])} " + " ".join("-f " + q(f) for f in c["files"]) + " up -d",
            "ps": f"{p} ps", "restart-svc": f"{p} restart {q(c['service'])}"}.get(d["cmd"])
+    if d["cmd"] != "ps":
+        guard(d, c["server"], f"docker compose {d['cmd']} ({c['project']})")
     if not cmd:
         raise RemoteError("bad compose command")
     return out_of(*drun(c["server"], cmd + " 2>&1", timeout=900))
@@ -942,6 +1026,7 @@ def r_inspect(d):
 
 def r_exec(d):
     c = get_c(d)
+    guard(d, c["server"], f"run a command in container {c['name']}")
     return out_of(*drun(c["server"], f"$D exec {q(c['name'])} sh -c {q(d['cmd'])} 2>&1", timeout=120))
 
 
@@ -1082,6 +1167,7 @@ def r_pm2_action(d):
     a = d.get("action")
     if a not in ("restart", "reload", "stop", "start", "flush"):
         raise RemoteError("bad action")
+    guard(d, s, f"pm2 {a} {p.get('name', '')}")
     rc, out, err = pm2_run(s, dm, f"{a} {int(p['id'])}")
     out = "\n".join(l for l in text(out).splitlines() if not re.search("[\u2500-\u257f]", l)).encode()
     if a in ("stop", "start", "restart", "reload"):
@@ -1194,6 +1280,7 @@ CLEAN = {
 
 def r_cleanup(d):
     s, a, arg = d["server"], d.get("action"), d.get("arg", "")
+    guard(d, s, "disk cleanup")
     if a in CLEAN:
         cmd = CLEAN[a][0]
     elif a == "clog" and re.fullmatch(r"/var/lib/docker/containers/[0-9a-f]{64}/[0-9a-f]{64}-json\.log", arg):
@@ -1218,6 +1305,8 @@ def r_multirun(d):
         raise RemoteError("enter a command")
     known = servers()
     srvs = [x for x in srvs if x in known][:50]
+    for sv in srvs:
+        guard(d, sv, "run a command")
     tmo = max(5, min(int(d.get("timeout") or 120), 900))
 
     def one(sv):
@@ -1558,6 +1647,7 @@ def r_fwrite(d):
         raise RemoteError("too large to save from the editor")
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         raise RemoteError("missing file version - reopen the file")
+    guard(d, s, f"save {p}")
     script = ('P=' + _rpath(p) + '; B=' + ("1" if d.get("backup", True) else "0") + '; '
               'T=$(mktemp "${TMPDIR:-/tmp}/dctl.XXXXXX") || exit 70; cat > "$T"; '
               'D=$(dirname "$P"); '
@@ -1589,6 +1679,143 @@ def r_fwrite(d):
 
 
 ROUTES.update({"/api/fread": r_fread, "/api/fdiff": r_fdiff, "/api/fwrite": r_fwrite})
+
+
+def r_protect(d):
+    s, on = d.get("server"), bool(d.get("on"))
+    if s not in servers():
+        raise RemoteError("unknown server")
+    p = protected()
+    if not on and s in p:
+        guard(d, s, "turn off protection")
+    (p.add if on else p.discard)(s)
+    save_protected(p)
+    return {"on": on}
+
+
+# ---- upload files from this computer into a folder on the server ----
+UPLOADS = {}      # ticket -> {"server", "dir", "exp"}: issued by /api/upcheck after the permission + protection checks
+
+
+def _upname(n):
+    n = str(n or "")
+    if n in ("", ".", "..") or "/" in n or "\0" in n or "\n" in n or len(n.encode()) > 255:
+        raise RemoteError(f"bad file name: {n[:60]!r}")
+    return n
+
+
+def r_upcheck(d):
+    s, p = d["server"], _clean_path(d.get("dir"))
+    names = [_upname(n) for n in (d.get("names") or [])][:500]
+    if not names:
+        raise RemoteError("no files")
+    guard(d, s, f"upload {len(names)} file{'s' if len(names) > 1 else ''} to {p}")
+    script = (f'D={_rpath(p)}; if [ -d "$D" ] || $S test -d "$D" 2>/dev/null; then :; else echo "@@ERR not a folder"; exit 0; fi; '
+              'cd / ; echo "@@PATH $(readlink -f "$D" 2>/dev/null || $S readlink -f "$D")"; '
+              'if [ -w "$D" ] && [ -x "$D" ]; then echo @@W; elif [ -n "$S" ]; then echo @@WSUDO; else echo @@WNO; fi; '
+              'while IFS= read -r N; do if [ -e "$D/$N" ] || $S test -e "$D/$N" 2>/dev/null; then '
+              'if [ -d "$D/$N" ] || $S test -d "$D/$N" 2>/dev/null; then echo "@@DIR $N"; else echo "@@EX $N"; fi; fi; done')
+    rc, out, err = srun(s, script, timeout=40, lazy=True, data=("\n".join(names) + "\n").encode())
+    res = {"path": p, "exists": [], "dirs": [], "sudo": False}
+    w = None
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("@@ERR "):
+            raise RemoteError(f"{p}: {line[6:]}")
+        if line.startswith("@@PATH "):
+            res["path"] = line[7:] or p
+        elif line in ("@@W", "@@WSUDO", "@@WNO"):
+            w = line
+        elif line.startswith("@@EX "):
+            res["exists"].append(line[5:])
+        elif line.startswith("@@DIR "):
+            res["dirs"].append(line[6:])
+    if w is None:
+        raise RemoteError(err.strip()[-300:] or f"could not check {p}")
+    if w == "@@WNO":
+        if _sudo_locked(s):
+            raise NeedSudo(s)
+        raise RemoteError(f"you have no permission to write in {res['path']}, and no sudo on this server")
+    res["sudo"] = w == "@@WSUDO"
+    now = time.time()
+    for k in [k for k, v in UPLOADS.items() if v["exp"] < now]:
+        del UPLOADS[k]
+    res["ticket"] = secrets.token_urlsafe(18)
+    UPLOADS[res["ticket"]] = {"server": s, "dir": res["path"], "exp": now + 3600}
+    return res
+
+
+def upload(handler, tk, name, overwrite, length):
+    """Stream the request body into DIR/.NAME.dctl-up.PID on the server (sudo only if the folder needs it),
+    check size + sha256, then move it into place keeping the owner and mode of a replaced file."""
+    s, D = tk["server"], tk["dir"]
+    pre, stdin = _sudo_pre(s, lazy=True)
+    script = (f'D={q(D)}; N={q(name)}; L={int(length)}; O={1 if overwrite else 0}; P="$D/$N"; T="$D/.$N.dctl-up.$$"; '
+              'if [ -w "$D" ] && [ -x "$D" ]; then F=; elif [ -n "$S" ]; then F=$S; else exit 77; fi; '
+              'if [ -e "$P" ] || $F test -e "$P" 2>/dev/null; then [ "$O" = 1 ] || exit 76; '
+              '{ [ -d "$P" ] || $F test -d "$P"; } && exit 78; fi; '
+              '$F tee "$T" > /dev/null || { $F rm -f "$T"; exit 73; }; '
+              '[ "$($F stat -c %s "$T")" = "$L" ] || { $F rm -f "$T"; exit 72; }; '
+              'echo "@@SHA $($F sha256sum "$T" | cut -d" " -f1)"; [ -n "$F" ] && echo @@SUDO; echo "@@TMP $T"')
+    proc = subprocess.Popen(SSH + target(s) + ["sh -c " + q(PRELUDE + pre + script)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    h, left, broken = hashlib.sha256(), length, False
+    try:
+        if stdin:
+            proc.stdin.write(stdin)
+        while left > 0:
+            chunk = handler.rfile.read(min(262144, left))
+            if not chunk:
+                break
+            left -= len(chunk)
+            h.update(chunk)
+            if not broken:
+                try:
+                    proc.stdin.write(chunk)
+                except (BrokenPipeError, OSError):
+                    broken = True          # remote stopped early (keep reading the body so the browser gets our answer)
+    except (BrokenPipeError, OSError):
+        pass
+    try:
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+    out, err = proc.stdout.read(), proc.stderr.read()
+    proc.wait()
+    out, err = out.decode("utf-8", "replace"), err.decode("utf-8", "replace").strip()
+    info = dict(l[2:].split(" ", 1) for l in out.splitlines() if l.startswith("@@") and " " in l)
+    tmp = info.get("TMP", "")
+    if "@@SUDOFAIL" in out:
+        SUDO_PW.pop(s, None)
+    msg = {77: "you have no permission to write in this folder.", 76: "a file with this name already exists.",
+           78: "a folder with this name already exists.", 73: "writing the file on the server failed (disk full?).",
+           72: "the upload was incomplete."}
+    if left > 0:
+        raise RemoteError("the upload was interrupted")
+    if proc.returncode != 0 or not tmp:
+        raise RemoteError(msg.get(proc.returncode, "") + (" " + err[-300:] if err else "") or f"upload failed (exit {proc.returncode})")
+    sudo = "@@SUDO" in out
+    finish = (f'T={q(tmp)}; P={q(D + "/" + name)}; F={"$S" if sudo else ""}; '
+              'if [ -e "$P" ] || $F test -e "$P" 2>/dev/null; then $F chown --reference="$P" "$T" 2>/dev/null; $F chmod --reference="$P" "$T" 2>/dev/null; '
+              'elif [ -n "$F" ]; then $F chown --reference="$(dirname "$P")" "$T" 2>/dev/null; $F chmod 644 "$T"; fi; '
+              '$F mv -f "$T" "$P" || { $F rm -f "$T"; exit 71; }')
+    abort = f'F={"$S" if sudo else ""}; $F rm -f {q(tmp)}'
+    if info.get("SHA") != h.hexdigest():
+        srun(s, abort, timeout=30, lazy=True)
+        raise RemoteError("the file on the server did not match what was sent, so it was not saved. Try again.")
+    try:
+        rc, _, err = srun(s, finish, timeout=60, lazy=True)
+    except Exception:
+        rc, err = -1, ""
+    if rc != 0:
+        try:
+            srun(s, abort, timeout=30, lazy=True)
+        except Exception:
+            pass
+        raise RemoteError("could not move the file into place. " + err.strip()[-300:])
+    return {"path": D.rstrip("/") + "/" + name, "size": length, "sudo": sudo}
+
+
+ROUTES.update({"/api/protect": r_protect, "/api/upcheck": r_upcheck})
 
 
 # ---- files inside a container (docker exec for listing, docker cp for download) ----
@@ -1728,6 +1955,7 @@ def r_svc_action(d):
     if not UNIT_RE.fullmatch(u):
         raise RemoteError("bad service name")
     if a in ("start", "stop", "restart", "reload"):
+        guard(d, s, f"{a} service {u}")
         cmd = f"$S systemctl {a} {q(u)} 2>&1; r=$?; echo \"now: $(systemctl is-active {q(u)})\"; exit $r"
         lazy = False
     elif a == "status":
@@ -1850,6 +2078,23 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_ok() or self.headers.get("X-Dctl") != TOKEN:
             return self._send(403, "forbidden", "text/plain")
+        u = urlparse(self.path)
+        if u.path == "/upload":
+            qs = parse_qs(u.query)
+            try:
+                tk = UPLOADS.get(qs.get("ticket", [""])[0])
+                if not tk or tk["exp"] < time.time():
+                    raise RemoteError("upload expired - please try again")
+                n = int(self.headers.get("Content-Length", -1))
+                if n < 0:
+                    raise RemoteError("missing file size")
+                res = {"ok": True, **upload(self, tk, _upname(qs.get("name", [""])[0]), qs.get("overwrite", ["0"])[0] == "1", n)}
+            except NeedSudo as e:
+                res = {"ok": False, "need_sudo": str(e)}
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            self.close_connection = True
+            return self._send(200, json.dumps(res), "application/json")
         fn = ROUTES.get(self.path)
         if not fn:
             return self._send(404, "not found", "text/plain")
@@ -1859,6 +2104,8 @@ class H(BaseHTTPRequestHandler):
             res = {"ok": True, **fn(d)}
         except NeedSudo as e:
             res = {"ok": False, "need_sudo": str(e)}
+        except Protected as e:
+            res = {"ok": False, "protected": e.server, "what": e.what}
         except Exception as e:
             res = {"ok": False, "error": str(e)}
         self._send(200, json.dumps(res), "application/json")
@@ -2202,6 +2449,11 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .diff .a{color:var(--ok);background:rgba(34,227,161,.07);display:inline-block;width:100%}.diff .d{color:#ff7d93;background:rgba(255,77,109,.07);display:inline-block;width:100%}.diff .h{color:#7fb4ff}
 
 /* modal / palette / toasts */
+#modal2{position:fixed;inset:0;background:rgba(3,4,8,.55);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:90;animation:fade .15s}
+.shield{color:#7dd3fc}.tag.prot{--c:#7dd3fc}
+.fbdrop{outline:2px dashed var(--a2);outline-offset:-6px;background:rgba(0,212,255,.05)}
+.upl{display:grid;grid-template-columns:minmax(120px,1fr) 160px 90px;gap:10px;align-items:center;font-size:12.5px;padding:3px 0}
+.upl .mbar{width:100%}.upl b{font-weight:500;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #modal,#pal{position:fixed;inset:0;background:rgba(3,4,8,.6);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:70;animation:fade .15s}
 #pal{align-items:flex-start;padding-top:12vh}
 .box{background:rgba(16,18,28,.96);border:1px solid var(--line2);border-radius:18px;padding:24px;width:min(460px,92vw);box-shadow:var(--shadow);animation:pop .22s cubic-bezier(.2,.8,.2,1)}
@@ -2274,6 +2526,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 <aside id="detail" class="hidden"></aside>
 <div id="bulkbar" class="hidden"></div>
 <div id="modal" class="hidden"><div class="box" id="mbox"></div></div>
+<div id="modal2" class="hidden"><div class="box" id="mbox2"></div></div>
 <div id="pal" class="hidden"><div class="palbox"><div class="search"><span id="palic"></span><input id="palq" placeholder="Search servers, containers, PM2 processes, ports (e.g. 6015)…" autocomplete="off"></div><div id="palres"></div>
   <div class="palfoot"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div></div></div>
 <div id="termp" class="hidden"><div class="tpbox">
@@ -2315,6 +2568,7 @@ const P={
  copy:'<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',chev:'<path d="M9 18l6-6-6-6"/>',more:'<circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/>',
  disk:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+ shield:'<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/>',upload:'<path d="M12 16V4M6 9l6-6 6 6M4 21h16"/>',
 };
 const ic=(n,s=16)=>`<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n]||''}</svg>`;
 $('#kbtnic').innerHTML=ic('search',15);$('#sic').innerHTML=ic('search',15);$('#palic').innerHTML=ic('search',18);
@@ -2329,6 +2583,9 @@ async function raw(path,data){
 async function api(path,data){
   const j=await raw(path,data);
   if(j.need_sudo){ if(await askSudo(j.need_sudo)) return api(path,data); throw new Error('sudo password needed for '+j.need_sudo); }
+  if(j.protected){ if(await protectConfirm(j.protected,j.what))
+      return api(path,{...data,confirm_server:[data&&data.confirm_server,j.protected].filter(Boolean).join(',')});
+    throw new Error(`Cancelled — ${j.protected} is a protected server`); }
   if(!j.ok) throw new Error(j.error);
   return j;
 }
@@ -2344,16 +2601,30 @@ function confirmBox(msg,ok='Confirm',danger){return new Promise(res=>{
   modal(`<h3>${ic(danger?'alert':'info',20)} Are you sure?</h3><p>${msg}</p><div class="row end"><button class="btn ghost" id="mno">Cancel</button><button class="btn ${danger?'danger':'primary'}" id="myes">${esc(ok)}</button></div>`);
   $('#mno').onclick=()=>{closeModal();res(false)};$('#myes').onclick=()=>{closeModal();res(true)};$('#myes').focus();
 })}
+// second layer above the main window, so a question never replaces what is open (editor, files, …)
+function dlg2(h){$('#mbox2').className='box wide';$('#mbox2').innerHTML=h;$('#modal2').classList.remove('hidden')}
+function closeDlg2(){$('#modal2').classList.add('hidden');$('#mbox2').innerHTML=''}
+function protectConfirm(server,what){return new Promise(res=>{
+  dlg2(`<h3>${ic('shield',20)} ${esc(server)} is protected</h3>
+   <p>You are about to <b>${esc(what||'make a change')}</b> on a protected server.</p>
+   <div class="form"><label>Type the server name <code>${esc(server)}</code> to continue</label><input id="d2in" autocomplete="off" spellcheck="false"></div>
+   <div class="row end" style="margin-top:6px"><button class="btn ghost" id="d2no">Cancel</button><button class="btn danger" id="d2yes" disabled>${ic('shield',14)} Continue</button></div>`);
+  $('#d2in').oninput=()=>{$('#d2yes').disabled=$('#d2in').value.trim()!==server};
+  $('#d2in').onkeydown=e=>{if(e.key==='Enter'&&!$('#d2yes').disabled)$('#d2yes').click()};
+  $('#d2no').onclick=()=>{closeDlg2();res(false)};$('#d2yes').onclick=()=>{closeDlg2();res(true)};setTimeout(()=>$('#d2in').focus(),30)})}
+function choose2(title,html,btns){return new Promise(res=>{   // btns: [[key,label,cls]]
+  dlg2(`<h3>${title}</h3>${html}<div class="row end" style="margin-top:12px;flex-wrap:wrap"><button class="btn ghost" id="d2no">Cancel</button>${btns.map(([k,l,c])=>`<button class="btn ${c||''}" data-d2="${k}">${l}</button>`).join('')}</div>`);
+  $('#d2no').onclick=()=>{closeDlg2();res(null)};$$('#mbox2 [data-d2]').forEach(b=>b.onclick=()=>{closeDlg2();res(b.dataset.d2)})})}
 function askSudo(server){return new Promise(res=>{
-  modal(`<h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('lock',18)}</span> Unlock ${esc(server)}</h3>
+  dlg2(`<h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('lock',18)}</span> Unlock ${esc(server)}</h3>
   <p>Your user needs <b>sudo</b> on this server for Docker / compose files. The password stays only in dctl's memory — never written to disk.</p>
-  <div class="form"><input type="password" id="pw" placeholder="sudo password"></div><div id="pwerr" class="err" style="margin-top:8px"></div>
-  <div class="row end" style="margin-top:6px"><button class="btn ghost" id="mno">Cancel</button><button class="btn primary" id="myes">${ic('lock',14)} Unlock</button></div>`);
-  const go=async()=>{$('#myes').disabled=true;$('#pwerr').innerHTML='<span class="spin"></span>';
-    try{const j=await raw('/api/sudo',{server,password:$('#pw').value});if(!j.ok){$('#pwerr').textContent=j.error;$('#myes').disabled=false;return}
-      closeModal();toast(`${esc(server)} unlocked`,'ok');res(true)}catch(e){$('#pwerr').textContent=e.message;$('#myes').disabled=false}};
-  $('#myes').onclick=go;$('#pw').onkeydown=e=>{if(e.key==='Enter')go()};$('#mno').onclick=()=>{closeModal();res(false)};
-  setTimeout(()=>$('#pw').focus(),30);
+  <div class="form"><input type="password" id="d2pw" placeholder="sudo password"></div><div id="d2err" class="err" style="margin-top:8px"></div>
+  <div class="row end" style="margin-top:6px"><button class="btn ghost" id="d2no">Cancel</button><button class="btn primary" id="d2yes">${ic('lock',14)} Unlock</button></div>`);
+  const go=async()=>{$('#d2yes').disabled=true;$('#d2err').innerHTML='<span class="spin"></span>';
+    try{const j=await raw('/api/sudo',{server,password:$('#d2pw').value});if(!j.ok){$('#d2err').textContent=j.error;$('#d2yes').disabled=false;return}
+      closeDlg2();toast(`${esc(server)} unlocked`,'ok');res(true)}catch(e){$('#d2err').textContent=e.message;$('#d2yes').disabled=false}};
+  $('#d2yes').onclick=go;$('#d2pw').onkeydown=e=>{if(e.key==='Enter')go()};$('#d2no').onclick=()=>{closeDlg2();res(false)};
+  setTimeout(()=>$('#d2pw').focus(),30);
 })}
 async function busy(btn,fn){const t=btn?.innerHTML;if(btn){btn.disabled=true;btn.innerHTML='<span class="spin"></span> '+(btn.textContent.trim()||'')}
   try{return await fn()}finally{if(btn&&btn.isConnected){btn.disabled=false;btn.innerHTML=t}}}
@@ -2440,7 +2711,7 @@ function card(s,i){
     :m.hasdocker===false?`<div class="cbar none"></div><div class="sc-foot"><span>Docker not installed</span></div>`
     :`<div class="cbar none"></div><div class="sc-foot">${s.state==='need_password'?`<span style="color:var(--warn)">${ic('lock',13)} Click to unlock with sudo password</span>`:'<span>container counts loading…</span>'}</div>`;
   return `<div class="scard st-${st} ${off?'off':''}" data-open="${esc(s.name)}" style="--d:${i*55}ms">
-    <div class="sc-top"><span class="pulse"></span><div class="grow" style="min-width:0"><div class="sc-name">${esc(s.name)}</div><div class="sc-host">${esc(s.host||'')}</div></div>
+    <div class="sc-top"><span class="pulse"></span><div class="grow" style="min-width:0"><div class="sc-name">${esc(s.name)}${s.protected?` <span class="shield" title="Protected: changes ask you to type the server name">${ic('shield',13)}</span>`:''}</div><div class="sc-host">${esc(s.host||'')}</div></div>
       <span class="tag">${st==='need_password'?ic('lock',11):''}${STATE[st]||st}</span>
       <button class="icon-btn x" data-menu="${esc(s.name)}" title="Move to group / remove server">${ic('more',16)}</button></div>
     ${off?`<div class="sc-err">${esc(s.error||'Not reachable')}</div><div class="mut small">Check VPN / firewall / SSH</div>`:`
@@ -2493,6 +2764,9 @@ function serverMenu(name){
     <div class="row" style="gap:8px;margin-top:4px"><button class="btn primary" id="mterm" style="flex:1;justify-content:center">${ic('term',15)} Terminal</button>
       <button class="btn" id="mrun" style="flex:1;justify-content:center">${ic('play',13)} Run command</button><button class="btn" id="mdisk" style="flex:1;justify-content:center">${ic('disk',15)} Disk cleanup</button></div>
     <div class="row" style="gap:8px;margin-top:8px"><button class="btn" id="mfiles" style="flex:1;justify-content:center">${ic('folder',15)} Files</button><button class="btn" id="msvc" style="flex:1;justify-content:center">${ic('cpu',15)} Services</button></div>
+    <div class="row" style="gap:10px;margin-top:12px;align-items:center"><span class="shield">${ic('shield',18)}</span>
+      <div class="grow small">${s.protected?'<b>Protected.</b> Restart, stop, delete, edit, cleanup… ask you to type the server name first.':'<b>Protect this server</b> (e.g. production): every change asks you to type its name first.'}</div>
+      <button class="btn sm" id="mprot">${s.protected?'Remove protection':'Protect'}</button></div>
     <label>Group on ${PGT[S.page]} page</label>${groupSelect(cur)}
     <div class="row end" style="margin-top:4px"><button class="btn primary" id="mmove">${ic('check',14)} Move</button></div>
     <div class="msep"></div>
@@ -2502,6 +2776,9 @@ function serverMenu(name){
     ${s.added?`<div class="row end" style="margin-top:8px"><button class="btn ghost" id="mforget" style="color:var(--bad)">Forget this server completely</button></div>`:''}
     <div class="row end" style="margin-top:10px"><button class="btn ghost" id="mno">Close</button></div></div>`);
   wireGroupSelect();$('#mno').onclick=closeModal;$('#mterm').onclick=()=>{closeModal();openTerm(name)};$('#mrun').onclick=()=>{closeModal();openRun([name])};$('#mdisk').onclick=()=>{closeModal();openDisk(name)};$('#mfiles').onclick=()=>{closeModal();openFiles(name)};$('#msvc').onclick=()=>{closeModal();openSvc(name)};
+  $('#mprot').onclick=async()=>{const on=!s.protected;try{await api('/api/protect',{server:name,on});s.protected=on;
+      for(const x of S.fleet)if(x.name===name)x.protected=on;closeModal();toast(on?`${ic('shield',14)} <b>${esc(name)}</b> is now protected`:`Protection removed from <b>${esc(name)}</b>`,'ok');
+      if(S.view==='home')renderHome(true);else renderLHead()}catch(e){toast(esc(e.message),'bad')}};
   $('#mmove').onclick=async()=>{const g=groupValue();if($('#as_group').value==='__new'&&!g){$('#as_gnew').focus();return}closeModal();
     await layoutOp('move',{server:name,group:g}).catch(()=>{});toast(`${esc(name)} → <b>${esc(g||'Ungrouped')}</b>`,'ok')};
   $('#mrm').onclick=async()=>{closeModal();if(!await confirmBox(`Remove <b>${esc(name)}</b> from the ${PGT[S.page]} page? Nothing changes on the server — you can add it back any time.`,'Remove',true))return;
@@ -2531,6 +2808,9 @@ function addServer(group){
     <div id="as_key_box"><label>Private key file (optional — your default keys are used if empty)</label><input id="as_key" placeholder="~/.ssh/my-server.pem"></div>
     <div id="as_pw_box" class="hidden"><label>SSH password</label><input id="as_pw" type="password">
       <div class="note" style="margin-top:10px;font-size:12.5px">Used <b>once</b> to add your SSH public key to the server (like <code>ssh-copy-id</code>). Afterwards no password is needed. The password is never stored.</div></div>
+    <label>Jump host <span class="dim">(optional: only if this server is reachable just through another server / bastion)</span></label>
+    <input id="as_jump" list="as_jumps" placeholder="bastion   or   user@bastion.example.com:22" autocomplete="off">
+    <datalist id="as_jumps">${(S.known||[]).map(k=>`<option value="${esc(k.name)}">${esc(k.host||'')}</option>`).join('')}</datalist>
     </div>
     <label>Group</label>${groupSelect(group)}
     <div id="as_err" class="err" style="margin-top:10px"></div>
@@ -2550,7 +2830,7 @@ function addServer(group){
         toast(`${picked.length} server${picked.length>1?'s':''} added${g?` to <b>${esc(g)}</b>`:''}`,'ok');renderHome();bgScan()}
       catch(e){$('#as_err').textContent=e.message;$('#myes').disabled=false}return}
     const d={name:$('#as_name').value,host:$('#as_host').value,port:$('#as_port').value,user:$('#as_user').value,
-             key:auth==='key'?$('#as_key').value:'',password:auth==='pw'?$('#as_pw').value:'',page:S.page,group:g};
+             key:auth==='key'?$('#as_key').value:'',password:auth==='pw'?$('#as_pw').value:'',jump:$('#as_jump').value.trim(),page:S.page,group:g};
     if(auth==='pw'&&!d.password){$('#as_err').textContent='Enter the SSH password';return}
     $('#myes').disabled=true;$('#as_err').innerHTML='<span class="spin"></span> <span class="mut">connecting…</span>';
     try{const j=await raw('/api/server_add',d);
@@ -2574,7 +2854,7 @@ function openServer(name,thenSelect){
 }
 function renderLHead(){
   const s=S.fleet.find(x=>x.name===S.fserver);
-  $('#ltitle').innerHTML=S.fserver?`<span class="pulse st-${s?.state||'ok'}" style="margin:0"></span>${esc(S.fserver)}`:`${ic('globe',22)} All servers`;
+  $('#ltitle').innerHTML=S.fserver?`<span class="pulse st-${s?.state||'ok'}" style="margin:0"></span>${esc(S.fserver)}${s?.protected?` <span class="tag prot" title="Changes ask you to type the server name">${ic('shield',11)} protected</span>`:''}`:`${ic('globe',22)} All servers`;
   $('#lsub').textContent=S.fserver?(s?.host||''):`${S.fleet.filter(x=>!OFF.includes(x.state)).length} servers online`;
   const m=s?.m||{},chip=(l,p)=>p==null?'':`<div class="chip">${l} <div class="mbar"><i style="width:${clamp(p)}%;background:${pgrad(p)}"></i></div><b>${clamp(p)}%</b></div>`;
   $('#lmetrics').innerHTML=S.fserver?chip('CPU',cpuPct(m))+chip('MEM',m.mem)+chip('DISK',m.disk)+(m.uptime?`<div class="chip">Uptime <b>${fmtUp(m.uptime)}</b></div>`:'')+(m.ver&&S.page==='docker'?`<div class="chip">Docker <b>${esc(m.ver)}</b></div>`:''):'';
@@ -3248,7 +3528,9 @@ function openFiles(server,path,o={}){FB.server=server;FB.q='';FB.c=o.container||
   modal(`<h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic(FB.c?'box':'folder',18)}</span> ${FB.c?`Files in container <code>${esc(FB.c)}</code> · ${esc(server)}`:'Files · '+esc(server)}</h3>
    <div class="row" style="gap:8px;margin-top:6px"><button class="btn sm" id="fbup" title="Parent folder">${ic('up',13)}</button><button class="btn sm" id="fbhome" title="Home folder">~</button>
      <input id="fbpath" class="mono" style="flex:1;font-size:12.5px" spellcheck="false" placeholder="/var/www/html  or a file path"><button class="btn primary sm" id="fbgo">Go</button></div>
-   <div class="row" style="gap:8px;margin-top:8px"><div class="search" style="flex:1;min-width:0"><span>${ic('search',14)}</span><input id="fbq" placeholder="Filter in this folder…"></div><span id="fbinfo" class="dim small"></span></div>
+   <div class="row" style="gap:8px;margin-top:8px"><div class="search" style="flex:1;min-width:0"><span>${ic('search',14)}</span><input id="fbq" placeholder="Filter in this folder…"></div><span id="fbinfo" class="dim small"></span>
+     ${FB.c?'':`<button class="btn sm" id="fbupl" title="Upload files from this computer into this folder (or drag files onto the list)">${ic('upload',13)} Upload</button><input type="file" id="fbfile" multiple class="hidden">`}</div>
+   <div id="fbprog" class="hidden" style="margin-top:10px"></div>
    <div id="fblist" class="fblist"></div>
    <div class="row end" style="margin-top:10px"><button class="btn ghost" id="mno">Close</button></div>`,'xl');
   $('#mno').onclick=closeModal;
@@ -3256,6 +3538,13 @@ function openFiles(server,path,o={}){FB.server=server;FB.q='';FB.c=o.container||
   if(FB.c){$('#fbhome').textContent='/';$('#fbhome').title='Container root'}
   $('#fbhome').onclick=()=>fbLoad(FB.c?'/':'~');$('#fbup').onclick=()=>{const p=(FB.data&&FB.data.path)||FB.path;fbLoad(p.replace(/\/[^\/]+\/?$/,'')||'/')};
   $('#fbq').oninput=e=>{FB.q=e.target.value.toLowerCase();fbRender()};
+  if(!FB.c){$('#fbupl').onclick=()=>$('#fbfile').click();$('#fbfile').onchange=e=>{const f=[...e.target.files];e.target.value='';fbUpload(f)};
+    const L=$('#fblist'),on=e=>{if(e.dataTransfer&&[...e.dataTransfer.types].includes('Files')){e.preventDefault();L.classList.add('fbdrop')}};
+    L.ondragenter=on;L.ondragover=on;L.ondragleave=e=>{if(!L.contains(e.relatedTarget))L.classList.remove('fbdrop')};
+    L.ondrop=e=>{e.preventDefault();L.classList.remove('fbdrop');const f=[...(e.dataTransfer.files||[])];
+      const dirs=[...(e.dataTransfer.items||[])].filter(i=>i.webkitGetAsEntry&&i.webkitGetAsEntry()?.isDirectory).length;
+      if(dirs)toast('Folders can\'t be uploaded — only files (zip the folder first)','info');
+      fbUpload(f.filter((x,i)=>!(e.dataTransfer.items[i]?.webkitGetAsEntry?.()?.isDirectory)))}}
   $('#fblist').onclick=e=>{const a=e.target.closest('[data-fa]');const r=e.target.closest('[data-fn]');if(!r)return;
     const it=FB.data.items[+r.dataset.fn],full=FB.data.kind==='file'?FB.data.path:FB.data.path.replace(/\/$/,'')+'/'+it.name;
     if(a){e.stopPropagation();return fbAct(a.dataset.fa,full,it)}
@@ -3282,6 +3571,36 @@ function fbRender(){const d=FB.data;if(!d)return;
      <span class="dim small mono">${it.type==='dir'?'':fmtB(it.size)}</span><span class="dim small">${when(it.mtime)}</span><span class="dim small mono fbown" title="${esc(it.owner)}">${esc(it.owner)}</span>
      <span class="fbacts">${it.type==='file'?`${!FB.c&&it.size<=5*1048576?`<button class="btn sm" data-fa="edit" title="Edit this file">${ic('edit',13)} Edit</button>`:''}${it.size<=50e6?`<button class="btn sm" data-fa="copy" title="Copy file content to clipboard">${ic('copy',13)} Copy</button>`:''}<button class="btn sm" data-fa="view" title="Open in a new browser tab">${ic('file',13)}</button><button class="btn sm primary" data-fa="dl">${ic('download',13)} Download</button>`:FB.c&&it.type==='dir'?`<button class="btn sm" data-fa="tar" title="Download this whole folder as a .tar file">${ic('download',13)} .tar</button>`:''}</span></div>`).join('')
    ||'<div class="dim" style="padding:20px;text-align:center">Empty folder</div>'}
+// ---------- upload files into the open folder ----------
+function upOne(ticket,f,overwrite,onp){return new Promise((res,rej)=>{const x=new XMLHttpRequest();
+  x.open('POST',`/upload?ticket=${encodeURIComponent(ticket)}&name=${encodeURIComponent(f.name)}&overwrite=${overwrite?1:0}`);
+  x.setRequestHeader('X-Dctl',TOKEN);x.setRequestHeader('Content-Type','application/octet-stream');
+  x.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded/e.total)};
+  x.onload=()=>{try{const j=JSON.parse(x.responseText);j.ok?res(j):rej(new Error(j.need_sudo?'sudo password needed':j.error))}catch(_){rej(new Error('HTTP '+x.status))}};
+  x.onerror=()=>rej(new Error('connection to dctl lost'));x.send(f)})}
+async function fbUpload(files){
+  if(!files.length)return;if(!FB.data||FB.data.kind!=='dir'){toast('Open a folder first','info');return}
+  if(FB.up){toast('An upload is already running','info');return}
+  const dir=FB.data.path,server=FB.server;let chk;
+  try{chk=await api('/api/upcheck',{server,dir,names:files.map(f=>f.name)})}catch(e){toast(esc(e.message),'bad');return}
+  if(chk.dirs.length){toast(`Skipped ${chk.dirs.map(esc).join(', ')} — a folder with that name exists`,'bad',6000);files=files.filter(f=>!chk.dirs.includes(f.name))}
+  let over=false;
+  if(chk.exists.length){const n=chk.exists.length;
+    const a=await choose2(`${ic('alert',20)} ${n} file${n>1?'s':''} already exist${n>1?'':'s'}`,
+      `<p>In <code>${esc(chk.path)}</code>:</p><pre class="term" style="max-height:30vh;overflow:auto">${chk.exists.map(esc).join('\n')}</pre><p class="small mut">Replacing keeps the file's owner and permissions.</p>`,
+      [...(files.length>n?[['skip','Skip these']]:[]),['over','Replace','danger']]);
+    if(!a)return;if(a==='skip')files=files.filter(f=>!chk.exists.includes(f.name));else over=true}
+  if(!files.length)return;
+  FB.up=true;const P=$('#fbprog');P.classList.remove('hidden');
+  P.innerHTML=`<div class="note"><div class="row" style="margin-bottom:6px"><b>${ic('upload',14)} Uploading to <code>${esc(chk.path)}</code>${chk.sudo?` <span class="dim small">${ic('lock',11)} with sudo</span>`:''}</b></div>${files.map((f,i)=>`<div class="upl" id="up${i}"><b title="${esc(f.name)}">${esc(f.name)}</b><div class="mbar"><i style="width:0%"></i></div><span class="dim small mono">${fmtB(f.size)}</span></div>`).join('')}</div>`;
+  let ok=0,bad=[];
+  for(const [i,f] of files.entries()){const row=$('#up'+i),bar=row&&row.querySelector('i'),st=row&&row.querySelector('span');
+    try{await upOne(chk.ticket,f,over,p=>{if(bar)bar.style.width=(p*100).toFixed(1)+'%';if(st&&p>=1)st.innerHTML='<span class="spin"></span> checking'});
+      ok++;if(bar){bar.style.width='100%';bar.style.background='var(--ok)'}if(st)st.innerHTML=`<span style="color:var(--ok)">${ic('check',12)} done</span>`}
+    catch(e){bad.push(f.name+': '+e.message);if(bar)bar.style.background='var(--bad)';if(st)st.innerHTML=`<span style="color:var(--bad)" title="${esc(e.message)}">failed</span>`}}
+  FB.up=false;
+  if(bad.length)toast(`${ok} uploaded, ${bad.length} failed:<br>${bad.map(esc).join('<br>')}`,'bad',9000);else toast(`${ok} file${ok>1?'s':''} uploaded to <b>${esc(chk.path)}</b>`,'ok');
+  if($('#fblist')&&FB.server===server){if(FB.data&&FB.data.path===dir)fbLoad(dir);setTimeout(()=>{if(!FB.up&&$('#fbprog')&&!bad.length)$('#fbprog').classList.add('hidden')},2500)}}
 async function fbAct(a,full,it){
   if(a==='edit')return fbEdit(full,it);
   if(a==='dl'||a==='tar'){const x=document.createElement('a');x.href=dlUrl(FB.server,full,false,FB.c,a==='tar'?'dir':'file');x.download=it.name+(a==='tar'?'.tar':'');document.body.appendChild(x);x.click();x.remove();
@@ -3623,6 +3942,7 @@ document.addEventListener('keydown',e=>{
   const typing=/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)||document.activeElement.closest?.('.CodeMirror');
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#pal').classList.contains('hidden')?openPal():closePal();return}
   if(e.key==='Escape'){
+    if(!$('#modal2').classList.contains('hidden')){$('#d2no')?.click();return}
     if(!$('#modal').classList.contains('hidden')){$('#mno')?.click();return}
     if(!$('#pal').classList.contains('hidden')){closePal();return}
     if(S.sel&&!document.activeElement.closest?.('.CodeMirror')){closeDetail();return}}
