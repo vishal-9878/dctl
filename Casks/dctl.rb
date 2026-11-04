@@ -1,9 +1,9 @@
 cask "dctl" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.4.0"
-  sha256 arm:   "ccda1cd2556fc9fbce47d949db0fdcc5156db40ae584fd252ccf7f47b277b100",
-         intel: "c050ffae4bb1d0bedd50cc976da2ee4d9287fa3657b18f0d963996700f86a3d8"
+  version "0.4.1"
+  sha256 arm:   "bb6040997886cdceca885009ab7f6736d62fd22ec96a684c9b70871cd0582c82",
+         intel: "42bb03cbe19cc7e3d5cd8fc1760000570c388b164be7f002c30edf92a2df8918"
 
   url "https://github.com/vishal-9878/dctl/releases/download/v#{version}/dctl-#{version}-macos-#{arch}.pkg"
   name "dctl"
