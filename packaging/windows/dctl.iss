@@ -1,5 +1,5 @@
 ; Inno Setup script -> dist\dctl-<version>-windows-setup.exe
-; Build:  ISCC /DVersion=0.1.0 packaging\windows\dctl.iss   (after PyInstaller made dist\windows\dctl-ui.exe)
+; Build:  ISCC /DVersion=0.1.0 packaging\windows\dctl.iss   (after PyInstaller made dist\windows\dctl\dctl.exe)
 #ifndef Version
   #define Version "0.0.0"
 #endif
@@ -18,7 +18,7 @@ PrivilegesRequired=lowest
 OutputDir=..\..\dist
 OutputBaseFilename=dctl-{#Version}-windows-setup
 SetupIconFile=..\dctl.ico
-UninstallDisplayIcon={app}\dctl-ui.exe
+UninstallDisplayIcon={app}\dctl.exe
 UninstallDisplayName=dctl
 LicenseFile=..\..\LICENSE
 Compression=lzma2
@@ -28,24 +28,24 @@ ChangesEnvironment=yes
 CloseApplications=yes
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
-Name: "addtopath"; Description: "Add dctl-ui to my PATH (start it from any terminal)"
+Name: "desktopicon"; Description: "Create a &desktop shortcut"
+Name: "addtopath"; Description: "Add dctl to my PATH (start it from any terminal)"; Flags: unchecked
 
 [Files]
-Source: "..\..\dist\windows\dctl-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\windows\dctl\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\dctl"; Filename: "{app}\dctl-ui.exe"; Comment: "Docker & PM2 dashboard for many servers"
-Name: "{autodesktop}\dctl"; Filename: "{app}\dctl-ui.exe"; Tasks: desktopicon
+Name: "{autoprograms}\dctl"; Filename: "{app}\dctl.exe"; Comment: "Docker & PM2 dashboard for many servers"
+Name: "{autodesktop}\dctl"; Filename: "{app}\dctl.exe"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; \
   Tasks: addtopath; Check: NeedsAddPath(ExpandConstant('{app}'))
 
 [Run]
-Filename: "{app}\dctl-ui.exe"; Description: "Start dctl now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\dctl.exe"; Description: "Start dctl now"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function NeedsAddPath(Dir: string): Boolean;

@@ -4,7 +4,9 @@ Runs on YOUR machine only. Servers need nothing new (just ssh + docker).
 Handles servers where docker / compose files need sudo (with or without password).
 sudo passwords are kept only in this process's memory, never written to disk.
 
-    dctl-ui              -> opens http://127.0.0.1:8765
+    dctl-ui              -> opens dctl in its own window
+    dctl-ui --browser    -> use your web browser instead
+    dctl-ui --server     -> no window; open http://127.0.0.1:8765 yourself (or set DCTL_NO_BROWSER=1)
     DCTL_PORT=9000 dctl-ui
 Servers: ~/.config/dctl/servers (one ssh host per line), else all Host entries of ~/.ssh/config.
 """
@@ -1699,6 +1701,14 @@ class H(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             return self._send(200, HTML.replace("__TOKEN__", TOKEN).replace("__NOPTY__", "true" if IS_WIN else "false"), "text/html; charset=utf-8")
         u = urlparse(self.path)
+        if u.path in ("/icon.png", "/favicon.ico"):
+            try:
+                data = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"), "rb").read()
+            except OSError:
+                return self._send(404, "no icon", "text/plain")
+            self.send_response(200); self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "max-age=86400"); self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
         if u.path == "/dl":
             qs = parse_qs(u.query)
             if qs.get("t", [""])[0] != TOKEN:
@@ -1749,7 +1759,8 @@ class H(BaseHTTPRequestHandler):
 
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>dctl · Docker Fleet</title>
+<title>dctl</title>
+<link rel="icon" type="image/png" href="/icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
@@ -1804,6 +1815,7 @@ kbd{font:500 10.5px var(--mono);padding:2px 6px;border-radius:5px;border:1px sol
 /* top bar */
 .top{display:flex;align-items:center;gap:16px;padding:12px 22px;border-bottom:1px solid var(--line);background:rgba(8,9,15,.55);backdrop-filter:blur(16px);position:relative;z-index:5}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:.3px;cursor:pointer;user-select:none}
+.logo-img{width:34px;height:34px;margin:-2px 0;filter:drop-shadow(0 4px 12px rgba(92,120,255,.45))}
 .logo-ico{width:32px;height:32px;border-radius:9px;background:var(--grad);display:grid;place-items:center;color:#fff;box-shadow:0 4px 18px -4px rgba(92,120,255,.8)}
 #crumb{display:flex;align-items:center;gap:8px;color:var(--mut);font-weight:500}
 #crumb a{cursor:pointer;color:var(--mut)}#crumb a:hover{color:var(--fg)}#crumb b{color:var(--fg)}
@@ -2111,7 +2123,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 </style></head><body>
 <div class="bg"><i></i><i></i><i></i></div>
 <header class="top">
-  <div class="brand" id="logo"><div class="logo-ico" id="logoic"></div><span>dctl</span></div>
+  <div class="brand" id="logo"><img src="/icon.png" alt="" class="logo-img"><span>dctl</span></div>
   <nav class="ptabs" id="ptabs"><a data-pg="docker"><span class="mi" data-i="box"></span>Docker</a><a data-pg="pm2"><span class="mi" data-i="bolt"></span>PM2</a></nav>
   <nav id="crumb"></nav>
   <span class="grow"></span>
@@ -2195,7 +2207,7 @@ const P={
  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
 };
 const ic=(n,s=16)=>`<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n]||''}</svg>`;
-$('#logoic').innerHTML=ic('box',18);$('#kbtnic').innerHTML=ic('search',15);$('#sic').innerHTML=ic('search',15);$('#palic').innerHTML=ic('search',18);
+$('#kbtnic').innerHTML=ic('search',15);$('#sic').innerHTML=ic('search',15);$('#palic').innerHTML=ic('search',18);
 $('#backhome').innerHTML=ic('back',18);$('#srvopt').innerHTML=ic('more',16);$('#srvopt').onclick=()=>S.fserver&&serverMenu(S.fserver);$('#rescan').innerHTML=ic('restart',15)+' Refresh';
 
 // ---------- api / ui primitives ----------
@@ -3435,35 +3447,133 @@ loadHome();
 </script></body></html>"""
 
 
+def _icon_path():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+    return p if os.path.exists(p) else None
+
+
+def _find_chromium():
+    """A Chrome / Edge / Chromium / Brave binary, for its chromeless --app window."""
+    import shutil, sys
+    for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge",
+              "microsoft-edge-stable", "brave-browser", "msedge", "chrome"):
+        p = shutil.which(n)
+        if p:
+            return p
+    cands = []
+    if IS_WIN:
+        for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
+            cands += [os.path.join(base, r"Microsoft\Edge\Application\msedge.exe"),
+                      os.path.join(base, r"Google\Chrome\Application\chrome.exe")]
+    elif sys.platform == "darwin":
+        cands = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                 "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
+    return next((c for c in cands if c and os.path.exists(c)), None)
+
+
+def open_window(url):
+    """Show the dashboard in its own application window and block until it is closed.
+    Returns False if no window could be shown (caller falls back to the normal browser)."""
+    import sys
+    try:
+        import webview                       # pywebview: native window (WebKitGTK / WebKit / Edge WebView2)
+    except Exception:
+        webview = None
+    if webview is not None:
+        try:
+            if sys.platform.startswith("linux"):
+                try:                         # so the taskbar matches dctl.desktop (StartupWMClass=dctl)
+                    import gi
+                    from gi.repository import GLib
+                    GLib.set_prgname("dctl"); GLib.set_application_name("dctl")
+                except Exception:
+                    pass
+            for k, v in (("ALLOW_DOWNLOADS", True), ("OPEN_EXTERNAL_LINKS_IN_BROWSER", True)):
+                try:
+                    webview.settings[k] = v
+                except Exception:
+                    pass
+            webview.create_window("dctl", url, width=1440, height=920, min_size=(960, 620), text_select=True,
+                                  background_color="#0b0d18")
+            kw = {"private_mode": False, "storage_path": os.path.join(CONF, "webview")}
+            if _icon_path():
+                kw["icon"] = _icon_path()
+            if IS_WIN:
+                kw["gui"] = "edgechromium"
+            try:
+                webview.start(**kw)
+            except TypeError:                # older pywebview without some options
+                webview.start()
+            return True
+        except Exception as e:
+            print(f"dctl-ui: native window not available ({e}); trying a browser app window", flush=True)
+    exe = _find_chromium()
+    if exe:
+        prof = os.path.join(CONF, "appwindow")   # own profile, so the process lives exactly as long as the window
+        t0 = time.time()
+        try:
+            subprocess.run([exe, f"--app={url}", f"--user-data-dir={prof}", "--class=dctl", "--window-size=1440,920",
+                            "--no-first-run", "--no-default-browser-check"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            return False
+        if time.time() - t0 < 3:                 # browser handed the window to another process: keep serving
+            print("dctl-ui: the app window runs in your browser; press Ctrl+C here to stop dctl", flush=True)
+            try:
+                threading.Event().wait()
+            except KeyboardInterrupt:
+                pass
+        return True
+    return False
+
+
 def main():
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] in ("-V", "--version"):
+    args = sys.argv[1:]
+    if args[:1] in (["-V"], ["--version"]):
         print("dctl-ui", __import__("dctl").__version__); return
-    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+    if args[:1] in (["-h"], ["--help"]):
         print(__doc__.strip()); return
+    mode = "window"
+    if "--browser" in args or os.environ.get("DCTL_BROWSER"):
+        mode = "browser"
+    if "--server" in args or os.environ.get("DCTL_NO_BROWSER"):
+        mode = "server"
+    url = f"http://127.0.0.1:{PORT}/"
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     except OSError as e:
-        url = f"http://127.0.0.1:{PORT}/"
-        try:                       # already running (e.g. started again from a desktop shortcut)? just open it
+        try:                       # already running (e.g. opened again from the app menu)? just show it
             import urllib.request
             if b"dctl" in urllib.request.urlopen(url, timeout=3).read(4096):
-                print(f"dctl UI is already running at {url}", flush=True)
-                if not os.environ.get("DCTL_NO_BROWSER"):
+                print(f"dctl is already running at {url}", flush=True)
+                if mode == "window" and not open_window(url):
+                    webbrowser.open(url)
+                elif mode == "browser":
                     webbrowser.open(url)
                 return
         except Exception:
             pass
         raise SystemExit(f"dctl-ui: cannot listen on 127.0.0.1:{PORT} ({e.strerror}). "
                          f"Another program uses this port. Start on another one with DCTL_PORT=9000 dctl-ui")
-    url = f"http://127.0.0.1:{PORT}/"
-    print(f"dctl UI running at {url}   (Ctrl+C to stop)", flush=True)
-    if not os.environ.get("DCTL_NO_BROWSER"):
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"dctl running at {url}", flush=True)
     try:
-        srv.serve_forever()
+        if mode == "window":
+            if open_window(url):
+                return             # window closed -> quit
+            print("dctl-ui: no app window available, opening your browser", flush=True)
+            mode = "browser"
+        if mode == "browser":
+            threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        print("Press Ctrl+C to stop.", flush=True)
+        threading.Event().wait()
     except KeyboardInterrupt:
         pass
+    finally:
+        srv.shutdown()
 
 
 if __name__ == "__main__":

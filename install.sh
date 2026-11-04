@@ -23,13 +23,13 @@ command -v ssh >/dev/null 2>&1 || fail "the OpenSSH client (ssh) is needed"
 
 if command -v pipx >/dev/null 2>&1; then
   say "installing with pipx"
-  pipx install --force "$SRC"
+  pipx install --force --system-site-packages "$SRC"   # system GTK/WebKit for the app window on Linux
 else
   DATA="${XDG_DATA_HOME:-$HOME/.local/share}/dctl"
   BIN="$HOME/.local/bin"
   say "installing into $DATA"
   rm -rf "$DATA/venv"
-  "$PY" -m venv "$DATA/venv" 2>/dev/null || fail "could not create a virtualenv. Ubuntu/Debian: sudo apt install python3-venv  (or install pipx)"
+  "$PY" -m venv --system-site-packages "$DATA/venv" 2>/dev/null || fail "could not create a virtualenv. Ubuntu/Debian: sudo apt install python3-venv  (or install pipx)"
   "$DATA/venv/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
   "$DATA/venv/bin/python" -m pip install --quiet "$SRC"
   mkdir -p "$BIN"

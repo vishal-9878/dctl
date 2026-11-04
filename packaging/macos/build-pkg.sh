@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build dist/dctl-<version>-macos-<arch>.pkg on macOS. Needs: python3 with pyinstaller, Xcode command line tools.
+# Build dist/dctl-<version>-macos-<arch>.pkg on macOS.
+# Needs: python3 with pyinstaller + pywebview, Xcode command line tools.
 #   packaging/macos/build-pkg.sh [version]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -7,50 +8,36 @@ VER="${1:-$(python3 -c 'import re;print(re.search(r"__version__ = \"(.+?)\"",ope
 VER="${VER#v}"; ARCH=$(uname -m)
 B=build/mac; ROOT=$B/root; rm -rf "$B"; mkdir -p "$B" dist
 
-# 1) standalone dctl-ui binary (Python bundled inside)
-python3 -m PyInstaller --noconfirm --onefile --name dctl-ui --paths src \
-  --distpath "$B/bin" --workpath "$B/work" --specpath "$B" packaging/launcher.py
-
-# 2) payload: /usr/local/lib/dctl, /usr/local/bin/{dctl,dctl-ui}, /Applications/dctl.app
-install -d "$ROOT/usr/local/lib/dctl" "$ROOT/usr/local/bin"
-install -m755 "$B/bin/dctl-ui" "$ROOT/usr/local/lib/dctl/dctl-ui"
-install -m755 src/dctl/dctl.sh "$ROOT/usr/local/lib/dctl/dctl.sh"
-ln -s ../lib/dctl/dctl-ui "$ROOT/usr/local/bin/dctl-ui"
-printf '#!/bin/sh\nexec bash /usr/local/lib/dctl/dctl.sh "$@"\n' > "$ROOT/usr/local/bin/dctl"; chmod 755 "$ROOT/usr/local/bin/dctl"
-
-APP="$ROOT/Applications/dctl.app/Contents"
-install -d "$APP/MacOS" "$APP/Resources"
-cat > "$APP/MacOS/dctl" <<'S'
-#!/bin/sh
-# Opens dctl in a Terminal window (shows the address; close the window to stop dctl).
-# If dctl is already running, this just opens the dashboard in the browser.
-exec open -a Terminal /usr/local/bin/dctl-ui
-S
-chmod 755 "$APP/MacOS/dctl"
+# 1) app icon (.icns) from the 1024 px PNG
 ICONSET="$B/dctl.iconset"; mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
   sips -z $s $s packaging/icon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  d=$((s * 2)); [ $d -le 512 ] && sips -z $d $d packaging/icon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  sips -z $((s * 2)) $((s * 2)) packaging/icon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
-cp packaging/icon.png "$ICONSET/icon_512x512@2x.png"
-iconutil -c icns "$ICONSET" -o "$APP/Resources/dctl.icns"
-cat > "$APP/Info.plist" <<S
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>dctl</string>
-  <key>CFBundleDisplayName</key><string>dctl</string>
-  <key>CFBundleIdentifier</key><string>io.github.vishal-9878.dctl</string>
-  <key>CFBundleVersion</key><string>$VER</string>
-  <key>CFBundleShortVersionString</key><string>$VER</string>
-  <key>CFBundleExecutable</key><string>dctl</string>
-  <key>CFBundleIconFile</key><string>dctl</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
-</dict></plist>
-S
+iconutil -c icns "$ICONSET" -o "$B/dctl.icns"
 
-# 3) the installer package (app must not be relocated to another copy the user may have)
+# 2) dctl.app: a real windowed app (Python + pywebview bundled inside)
+python3 -m PyInstaller --noconfirm --windowed --name dctl --icon "$B/dctl.icns" --exclude-module pkg_resources \
+  --osx-bundle-identifier io.github.vishal-9878.dctl --paths src --add-data "src/dctl/icon.png:dctl" \
+  --distpath "$B/dist" --workpath "$B/work" packaging/launcher.py
+APPB="$B/dist/dctl.app"
+PL="$APPB/Contents/Info.plist"
+pb() { /usr/libexec/PlistBuddy -c "$1" "$PL" 2>/dev/null || true; }
+pb "Set :CFBundleShortVersionString $VER"; pb "Add :CFBundleShortVersionString string $VER"
+pb "Set :CFBundleVersion $VER"; pb "Add :CFBundleVersion string $VER"
+pb "Add :LSApplicationCategoryType string public.app-category.developer-tools"
+pb "Add :NSHighResolutionCapable bool true"
+pb "Add :NSAppTransportSecurity dict"; pb "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true"
+codesign --force --deep --sign - "$APPB"          # ad-hoc signature (needed on Apple Silicon after editing the plist)
+
+# 3) payload: /Applications/dctl.app, /usr/local/bin/{dctl-ui,dctl}, /usr/local/lib/dctl/dctl.sh
+install -d "$ROOT/Applications" "$ROOT/usr/local/lib/dctl" "$ROOT/usr/local/bin"
+cp -R "$APPB" "$ROOT/Applications/"
+install -m755 src/dctl/dctl.sh "$ROOT/usr/local/lib/dctl/dctl.sh"
+ln -s /Applications/dctl.app/Contents/MacOS/dctl "$ROOT/usr/local/bin/dctl-ui"
+printf '#!/bin/sh\nexec bash /usr/local/lib/dctl/dctl.sh "$@"\n' > "$ROOT/usr/local/bin/dctl"; chmod 755 "$ROOT/usr/local/bin/dctl"
+
+# 4) installer package (don't relocate the app onto another copy the user may have elsewhere)
 pkgbuild --analyze --root "$ROOT" "$B/component.plist" >/dev/null
 /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$B/component.plist"
 OUT="dist/dctl-${VER}-macos-${ARCH}.pkg"

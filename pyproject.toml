@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Vishal Singh" }]
 requires-python = ">=3.8"
-dependencies = []
+dependencies = ["pywebview>=5"]   # native app window; falls back to a browser window if unavailable
 keywords = ["docker", "pm2", "ssh", "devops", "dashboard", "agentless", "docker-compose"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -34,7 +34,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-dctl = ["dctl.sh"]
+dctl = ["dctl.sh", "icon.png"]
 
 [tool.setuptools.dynamic]
 version = { attr = "dctl.__version__" }

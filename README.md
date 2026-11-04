@@ -1,6 +1,8 @@
-# dctl
+<p align="center"><img src="packaging/icons/128.png" width="112" alt="dctl"></p>
 
-**Agentless dashboard and CLI for Docker and PM2 across many servers, using only SSH.**
+<h1 align="center">dctl</h1>
+
+<p align="center"><b>Agentless desktop app and CLI for Docker and PM2 across many servers, using only SSH.</b></p>
 
 dctl runs on *your* machine. The servers need nothing new: no agent, no daemon, no open ports, no package to install. If you can `ssh` into a server and it has Docker or PM2, dctl can manage it.
 
@@ -11,7 +13,7 @@ It is a good fit when:
 - PM2 processes run as different Linux users (root, app users), and you can only log in as yourself;
 - some servers have restrictive sudoers rules, for example shells are not allowed through sudo.
 
-It is two files: a Bash CLI (`dctl`) and a web UI (`dctl-ui`) written in Python using only the standard library.
+dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Bash CLI (`dctl`). The app is written in Python using only the standard library, and shows its interface in a native window through [pywebview](https://pywebview.flowrl.com/).
 
 ---
 
@@ -63,7 +65,7 @@ It is two files: a Bash CLI (`dctl`) and a web UI (`dctl-ui`) written in Python 
 
 ## Install
 
-You get two commands: `dctl-ui` (web dashboard) and `dctl` (terminal CLI).
+You get the **dctl** app (in your applications menu) plus two commands: `dctl-ui` (opens the app) and `dctl` (terminal CLI).
 
 ### Download an installer
 
@@ -76,9 +78,10 @@ Get the latest file from the **[Releases page](https://github.com/vishal-9878/dc
 | macOS (Apple Silicon) | `dctl-<version>-macos-arm64.pkg` | Double-click. |
 | macOS (Intel) | `dctl-<version>-macos-x86_64.pkg` | Double-click. |
 
-After installing, open **dctl** from your applications menu / Start menu / Applications folder, or run `dctl-ui` in a terminal. A window shows the dashboard address; close it to stop dctl.
+After installing, open **dctl** from your applications menu / Start menu / Applications folder, or run `dctl-ui` in a terminal. dctl opens in its own window; closing the window stops it.
 
-The Windows and macOS installers include their own Python, so nothing else is needed. The `.deb` uses the system `python3`.
+The Windows and macOS installers include their own Python, so nothing else is needed. The `.deb` uses the system `python3` and WebKitGTK (installed automatically by apt).
+Windows uses the Edge WebView2 runtime, which Windows 10/11 already have.
 
 > **First launch warning:** the installers are not code-signed yet.
 > - **Windows** may show "Windows protected your PC". Click **More info → Run anyway**.
@@ -138,13 +141,15 @@ cd dctl
 
 1. Make sure you can `ssh <server>` without typing a password (SSH keys).
    Servers are read from `~/.ssh/config` (every `Host` entry without wildcards).
-2. Start the web UI:
+2. Open **dctl** from your applications menu, or run:
 
    ```bash
-   dctl-ui
+   dctl-ui              # own app window
+   dctl-ui --browser    # in your web browser instead
+   dctl-ui --server     # no window; open http://127.0.0.1:8765 yourself (e.g. over an SSH tunnel)
    ```
 
-   It opens `http://127.0.0.1:8765` in your browser.
+   If no native window is available, dctl uses a Chrome/Edge app window, and as a last resort your normal browser.
 3. Click **Add server**, or pick servers you already have in `~/.ssh/config`.
 
 ### Choosing servers
@@ -186,7 +191,8 @@ dctl web              open the web UI
 | Variable | Default | Meaning |
 |---|---|---|
 | `DCTL_PORT` | `8765` | Port of the web UI |
-| `DCTL_NO_BROWSER` | unset | Set to `1` to not open a browser on start |
+| `DCTL_NO_BROWSER` | unset | Set to `1` to start without any window (same as `--server`) |
+| `DCTL_BROWSER` | unset | Set to `1` to always use the web browser (same as `--browser`) |
 | `DCTL_SERVERS` | unset | Space- or comma-separated server list (overrides files) |
 | `DCTL_CONF` | `~/.config/dctl` | Config folder |
 | `DCTL_TAIL` | `200` | Default number of log lines in the CLI |
@@ -232,7 +238,8 @@ ssh -L 8765:127.0.0.1:8765 your-workstation
 | Server shows "no access" | `ssh <server>` must work without a password prompt. Check your key and `~/.ssh/config`. |
 | Asked for a sudo password | Your user needs sudo for Docker there. Enter it once; it stays in memory until dctl-ui stops. |
 | "sudo here does not allow running a shell" | The server forbids shells through sudo. dctl works around it; use `sudo` inside commands you run yourself. |
-| Terminal doesn't open | The browser must be able to reach `cdn.jsdelivr.net` to load xterm.js. |
+| Terminal doesn't open | dctl must be able to reach `cdn.jsdelivr.net` to load xterm.js. |
+| App opens in the browser instead of its own window | Linux: install `gir1.2-webkit2-4.1` and `python3-gi` (the `.deb` does this). Windows: install the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
 | PM2 of another user is locked | Your user needs `sudo -u <that user>` rights, or the sudo password. |
 
 ---
