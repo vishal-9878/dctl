@@ -1,6 +1,6 @@
 # dctl installer for Windows (PowerShell). No admin rights needed.
 #
-#   irm https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/vishal-9878/dctl/main/install.ps1 | iex
 #
 # Installs with pipx if you have it, otherwise into its own virtualenv in
 # %LOCALAPPDATA%\dctl and adds a small bin folder (only dctl-ui / dctl) to your user PATH.
@@ -8,7 +8,7 @@
 # experience (web terminal, bash CLI) install inside WSL with install.sh instead.
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'https://github.com/YOUR-GITHUB-USERNAME/dctl'
+$Repo = 'https://github.com/vishal-9878/dctl'
 $Src  = if ($env:DCTL_SRC) { $env:DCTL_SRC } else { "$Repo/archive/refs/heads/main.tar.gz" }
 
 function Say($m) { Write-Host ">> $m" -ForegroundColor Magenta }

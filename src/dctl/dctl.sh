@@ -232,7 +232,9 @@ usage() { sed -n '2,22p' "$SELF" | sed 's/^# \{0,1\}//'; }
 cmd=${1:-ui}; shift 2>/dev/null
 case $cmd in
   ui) ui ;;
-  web|gui) exec "${DCTL_PY:-python3}" -m dctl.ui ;;
+  web|gui) if [ -n "${DCTL_PY:-}" ]; then exec "$DCTL_PY" -m dctl.ui
+           elif command -v dctl-ui >/dev/null 2>&1; then exec dctl-ui
+           else exec python3 -m dctl.ui; fi ;;
   ls|list) cmd_ls "$1" ;;
   servers) servers ;;
   refresh) refresh ;;

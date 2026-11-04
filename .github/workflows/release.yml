@@ -1,0 +1,97 @@
+name: Build installers
+
+# Push a tag like v0.1.0  ->  builds .deb, Windows setup .exe and macOS .pkg, and publishes a GitHub Release.
+# "Run workflow" by hand  ->  builds them as downloadable artifacts only (no release).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deb:
+    name: Ubuntu / Debian (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set version
+        run: echo "VER=$(python3 packaging/version.py)" >> "$GITHUB_ENV"
+      - name: Build
+        run: packaging/build-deb.sh "$VER"
+      - name: Smoke test
+        run: |
+          sudo apt-get install -y ./dist/dctl_${VER}_all.deb
+          dctl --version
+          dctl-ui --version
+      - uses: actions/upload-artifact@v4
+        with: { name: deb, path: dist/*.deb }
+
+  windows:
+    name: Windows (setup .exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Set version
+        run: echo "VER=$(python packaging/version.py)" >> "$GITHUB_ENV"
+      - name: Build dctl-ui.exe
+        run: |
+          python -m pip install pyinstaller==6.11.1
+          python -m PyInstaller --noconfirm --onefile --console --name dctl-ui --icon packaging/dctl.ico \
+            --paths src --distpath dist/windows --workpath build/win --specpath build packaging/launcher.py
+          ./dist/windows/dctl-ui.exe --version
+      - name: Build installer
+        run: |
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -f "$ISCC" ] || choco install innosetup -y --no-progress
+          "$ISCC" "//DVersion=$VER" packaging/windows/dctl.iss
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/*.exe }
+
+  macos:
+    name: macOS ${{ matrix.arch }} (.pkg)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, arch: arm64 }
+          - { os: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Set version
+        run: echo "VER=$(python3 packaging/version.py)" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          python3 -m pip install pyinstaller==6.11.1
+          packaging/macos/build-pkg.sh "$VER"
+          build/mac/bin/dctl-ui --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*.pkg
+
+  release:
+    name: Publish release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
+    needs: [deb, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

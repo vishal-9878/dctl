@@ -3444,8 +3444,18 @@ def main():
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     except OSError as e:
+        url = f"http://127.0.0.1:{PORT}/"
+        try:                       # already running (e.g. started again from a desktop shortcut)? just open it
+            import urllib.request
+            if b"dctl" in urllib.request.urlopen(url, timeout=3).read(4096):
+                print(f"dctl UI is already running at {url}", flush=True)
+                if not os.environ.get("DCTL_NO_BROWSER"):
+                    webbrowser.open(url)
+                return
+        except Exception:
+            pass
         raise SystemExit(f"dctl-ui: cannot listen on 127.0.0.1:{PORT} ({e.strerror}). "
-                         f"Is it already running? Use another port with DCTL_PORT=9000 dctl-ui")
+                         f"Another program uses this port. Start on another one with DCTL_PORT=9000 dctl-ui")
     url = f"http://127.0.0.1:{PORT}/"
     print(f"dctl UI running at {url}   (Ctrl+C to stop)", flush=True)
     if not os.environ.get("DCTL_NO_BROWSER"):

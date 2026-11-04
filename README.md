@@ -63,46 +63,73 @@ It is two files: a Bash CLI (`dctl`) and a web UI (`dctl-ui`) written in Python 
 
 ## Install
 
-You get two commands: `dctl-ui` (web dashboard) and `dctl` (terminal CLI). No sudo or admin rights are needed.
+You get two commands: `dctl-ui` (web dashboard) and `dctl` (terminal CLI).
 
-### Linux and macOS
+### Download an installer
+
+Get the latest file from the **[Releases page](https://github.com/vishal-9878/dctl/releases/latest)**:
+
+| OS | File | How to install |
+|---|---|---|
+| Ubuntu / Debian | `dctl_<version>_all.deb` | `sudo apt install ./dctl_<version>_all.deb` |
+| Windows 10/11 | `dctl-<version>-windows-setup.exe` | Double-click. No admin rights needed. |
+| macOS (Apple Silicon) | `dctl-<version>-macos-arm64.pkg` | Double-click. |
+| macOS (Intel) | `dctl-<version>-macos-x86_64.pkg` | Double-click. |
+
+After installing, open **dctl** from your applications menu / Start menu / Applications folder, or run `dctl-ui` in a terminal. A window shows the dashboard address; close it to stop dctl.
+
+The Windows and macOS installers include their own Python, so nothing else is needed. The `.deb` uses the system `python3`.
+
+> **First launch warning:** the installers are not code-signed yet.
+> - **Windows** may show "Windows protected your PC". Click **More info → Run anyway**.
+> - **macOS** may say the package "cannot be opened". **Right-click the .pkg → Open**, or go to **System Settings → Privacy & Security → Open Anyway**.
+
+### Install script (no sudo / admin)
+
+#### Linux and macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vishal-9878/dctl/main/install.sh | sh
 ```
 
-### Windows (PowerShell)
+#### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/vishal-9878/dctl/main/install.ps1 | iex
 ```
 
 > On native Windows the **web terminal** and the bash **`dctl` CLI** are not available, and each action opens a new SSH connection (Windows OpenSSH has no connection sharing). Everything else in the dashboard works.
 > For the full experience, install inside **WSL** with the Linux command above.
 
-### With pipx (any OS)
+#### With pipx (any OS)
 
 ```bash
-pipx install "https://github.com/YOUR-GITHUB-USERNAME/dctl/archive/refs/heads/main.tar.gz"
+pipx install "https://github.com/vishal-9878/dctl/archive/refs/heads/main.tar.gz"
 ```
 
 The installers use pipx when it is available. Otherwise they create a private virtualenv (`~/.local/share/dctl` or `%LOCALAPPDATA%\dctl`), so your system Python is not touched.
 
 ### Update / uninstall
 
-Run the install command again to update. To uninstall:
+To update, install the newer release file (or run the install command again).
 
-```bash
-pipx uninstall dctl                     # if installed with pipx
-rm -rf ~/.local/share/dctl ~/.local/bin/dctl ~/.local/bin/dctl-ui   # Linux/macOS installer
-```
+To uninstall:
 
-On Windows, delete `%LOCALAPPDATA%\dctl` and remove its `bin` folder from your user PATH.
+| Installed with | Uninstall |
+|---|---|
+| `.deb` | `sudo apt remove dctl` |
+| Windows setup `.exe` | Settings → Apps → **dctl** → Uninstall |
+| macOS `.pkg` | `sudo rm -rf /Applications/dctl.app /usr/local/lib/dctl /usr/local/bin/dctl /usr/local/bin/dctl-ui && sudo pkgutil --forget io.github.vishal-9878.dctl` |
+| pipx | `pipx uninstall dctl` |
+| install script (Linux/macOS) | `rm -rf ~/.local/share/dctl ~/.local/bin/dctl ~/.local/bin/dctl-ui` |
+| install script (Windows) | delete `%LOCALAPPDATA%\dctl` and remove its `bin` folder from your user PATH |
+
+Your settings in `~/.config/dctl` are kept; delete that folder too for a clean removal.
 
 ### Run from a clone (for development)
 
 ```bash
-git clone https://github.com/YOUR-GITHUB-USERNAME/dctl.git
+git clone https://github.com/vishal-9878/dctl.git
 cd dctl
 ./dctl-ui        # or: ./dctl ls
 ```
@@ -207,6 +234,25 @@ ssh -L 8765:127.0.0.1:8765 your-workstation
 | "sudo here does not allow running a shell" | The server forbids shells through sudo. dctl works around it; use `sudo` inside commands you run yourself. |
 | Terminal doesn't open | The browser must be able to reach `cdn.jsdelivr.net` to load xterm.js. |
 | PM2 of another user is locked | Your user needs `sudo -u <that user>` rights, or the sudo password. |
+
+---
+
+## Building the installers
+
+GitHub Actions builds all installers (`.github/workflows/release.yml`). To publish a release:
+
+1. Set the new version in `src/dctl/__init__.py`, then commit.
+2. Tag and push:
+
+   ```bash
+   git tag v0.1.0
+   git push origin main v0.1.0
+   ```
+
+The workflow builds the `.deb` on Ubuntu, the setup `.exe` on Windows (PyInstaller + Inno Setup) and the `.pkg` on macOS (arm64 and Intel), then attaches them to a GitHub Release.
+You can also start it by hand from the **Actions** tab ("Run workflow") to get the files as artifacts without making a release.
+
+To build the `.deb` locally: `packaging/build-deb.sh` (writes to `dist/`).
 
 ---
 

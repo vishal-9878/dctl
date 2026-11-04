@@ -1,14 +1,14 @@
 #!/bin/sh
 # dctl installer for Linux and macOS. No sudo needed.
 #
-#   curl -fsSL https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/dctl/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/vishal-9878/dctl/main/install.sh | sh
 #
 # Installs with pipx if you have it, otherwise into its own virtualenv in
 # ~/.local/share/dctl and links `dctl` and `dctl-ui` into ~/.local/bin.
 # Uninstall:  pipx uninstall dctl   or   rm -rf ~/.local/share/dctl ~/.local/bin/dctl ~/.local/bin/dctl-ui
 set -eu
 
-REPO="https://github.com/YOUR-GITHUB-USERNAME/dctl"
+REPO="https://github.com/vishal-9878/dctl"
 SRC="${DCTL_SRC:-$REPO/archive/refs/heads/main.tar.gz}"   # DCTL_SRC can be a local folder or another URL
 
 say()  { printf '\033[1;35m»\033[0m %s\n' "$*"; }
