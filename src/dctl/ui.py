@@ -164,7 +164,7 @@ def run(server, script, elevate=False, stdin=None, timeout=60):
                       "Ask the admin to add you to the 'docker' group or give sudo access.")
 
 
-def srun(server, script, timeout=90, lazy=False):
+def srun(server, script, timeout=90, lazy=False, data=b""):
     """Run script as the normal user; inside it, $S is a sudo prefix for single commands and $DK is docker
     (with sudo if needed). Works on servers whose sudoers forbid shells (!/bin/sh) - only plain commands get sudo."""
     if INFO.get(server, {}).get("sudo") is None:
@@ -183,7 +183,9 @@ def srun(server, script, timeout=90, lazy=False):
         stdin = (pw + "\n").encode()
     else:
         pre = 'S=; '
-    pre += 'if docker info >/dev/null 2>&1; then DK=docker; else DK="$S docker"; fi; '
+    pre += 'if docker info </dev/null >/dev/null 2>&1; then DK=docker; else DK="$S docker"; fi; '
+    if data:
+        stdin = (stdin or b"") + data
     rc, out, err = ssh(server, "sh -c " + q(PRELUDE + pre + script), stdin, timeout)
     if b"@@SUDOFAIL" in out:
         SUDO_PW.pop(server, None)
@@ -1458,7 +1460,9 @@ def r_ls(d):
               'if [ "$K" = dir ]; then if [ -r "$P" ] && [ -x "$P" ]; then F=; else F=$S; echo @@SUDO; fi; '
               '$F find "$P" -mindepth 1 -maxdepth 1 -printf "%y\\t%s\\t%T@\\t%u\\t%f\\n" 2>/dev/null | head -2000; '
               'else if [ -r "$P" ]; then :; else echo @@SUDO; fi; $S stat --printf "f\\t%s\\t%Y\\t%U\\t%n\\n" "$P" 2>/dev/null || stat --printf "f\\t%s\\t%Y\\t%U\\t%n\\n" "$P"; fi')
-    rc, out, err = srun(s, script, timeout=40)
+    rc, out, err = srun(s, script, timeout=40, lazy=True)       # try without sudo first
+    if b"@@SUDO" in out and _sudo_locked(s):
+        raise NeedSudo(s)                                          # this folder/file needs sudo: ask, then the UI retries
     res = {"path": p, "kind": "dir", "items": [], "sudo": False}
     for line in out.decode("utf-8", "replace").splitlines():
         if line.startswith("@@ERR "):
@@ -1482,6 +1486,109 @@ def r_ls(d):
 
 
 ROUTES["/api/ls"] = r_ls
+
+# ---- edit a text file on the server ----
+EDIT_MAX = 5 * 1024 * 1024
+
+
+def r_fread(d):
+    s, p = d["server"], _clean_path(d.get("path"))
+    script = ('P=' + _rpath(p) + '; '
+              'if [ ! -e "$P" ] && ! $S test -e "$P" 2>/dev/null; then echo "@@ERR no such file"; exit 0; fi; '
+              'if [ -d "$P" ] || $S test -d "$P" 2>/dev/null; then echo "@@ERR this is a folder"; exit 0; fi; '
+              'if [ -r "$P" ]; then F=; elif [ -n "$S" ] && $S test -r "$P"; then F=$S; echo @@SUDO; '
+              'else echo "@@ERR you have no permission to read this file"; exit 0; fi; '
+              'echo "@@PATH $(readlink -f "$P" 2>/dev/null || echo "$P")"; '
+              'echo "@@SIZE $($F stat -c %s "$P")"; '
+              'if [ -w "$P" ]; then echo @@W; elif [ -n "$S" ]; then echo @@WSUDO; else echo "@@W?"; fi; '
+              f'[ "$($F stat -c %s "$P")" -le {EDIT_MAX} ] || exit 0; '
+              'echo @@DATA; $F base64 -w0 "$P"; echo')
+    rc, out, err = srun(s, script, timeout=60, lazy=True)       # try without sudo first
+    if b"@@ERR you have no permission" in out and _sudo_locked(s):
+        raise NeedSudo(s)                                          # ask for the password, then the UI retries
+    res, data = {"path": p, "sudo": False, "writable": "no", "size": 0}, None
+    for line in out.decode("utf-8", "replace").splitlines():
+        if data is not None:
+            data += line
+        elif line.startswith("@@ERR "):
+            raise RemoteError(f"{p}: {line[6:]}")
+        elif line.startswith("@@PATH "):
+            res["path"] = line[7:]
+        elif line.startswith("@@SIZE "):
+            res["size"] = int(line[7:] or 0)
+        elif line == "@@SUDO":
+            res["sudo"] = True
+        elif line == "@@W":
+            res["writable"] = "yes"
+        elif line == "@@WSUDO":
+            res["writable"] = "sudo"
+        elif line == "@@W?" and _sudo_locked(s):
+            res["writable"] = "sudo"                               # sudo not unlocked yet; saving will ask for it
+        elif line == "@@DATA":
+            data = ""
+    if res["size"] > EDIT_MAX:
+        raise RemoteError(f"this file is {res['size'] / 1048576:.1f} MB; editing works up to {EDIT_MAX // 1048576} MB. Download it instead.")
+    if data is None:
+        raise RemoteError((err.strip() or "could not read the file")[-300:])
+    raw = base64.b64decode(data)
+    if b"\0" in raw[:65536]:
+        raise RemoteError("this looks like a binary file, so it can't be edited here. Download it instead.")
+    try:
+        res["content"] = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RemoteError("this file is not UTF-8 text, so it can't be edited here. Download it instead.")
+    res["sha"] = hashlib.sha256(raw).hexdigest()
+    return res
+
+
+def _sudo_locked(server):
+    """sudo needs a password here and it hasn't been entered yet."""
+    return INFO.get(server, {}).get("sudo") == "pass" and server not in SUDO_PW
+
+
+def r_fdiff(d):
+    a, b, name = d.get("orig", ""), d.get("content", ""), d.get("name", "file")
+    return {"diff": "".join(difflib.unified_diff(a.splitlines(True), b.splitlines(True), f"{name} (on server)", f"{name} (edited)"))}
+
+
+def r_fwrite(d):
+    s, p, sha = d["server"], _clean_path(d.get("path")), d.get("sha") or ""
+    data = (d.get("content") or "").encode("utf-8")
+    if len(data) > EDIT_MAX:
+        raise RemoteError("too large to save from the editor")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        raise RemoteError("missing file version - reopen the file")
+    script = ('P=' + _rpath(p) + '; B=' + ("1" if d.get("backup", True) else "0") + '; '
+              'T=$(mktemp "${TMPDIR:-/tmp}/dctl.XXXXXX") || exit 70; cat > "$T"; '
+              'D=$(dirname "$P"); '
+              'if [ -w "$P" ] && { [ "$B" = 0 ] || [ -w "$D" ]; }; then F=; elif [ -n "$S" ]; then F=$S; else rm -f "$T"; exit 77; fi; '
+              'cur=$($F sha256sum "$P" | cut -d" " -f1); [ "$cur" = ' + q(sha) + ' ] || { rm -f "$T"; exit 75; }; '
+              'if [ "$B" = 1 ]; then BK="$P.bak.$(date +%Y%m%d-%H%M%S)"; $F cp -p "$P" "$BK" || { rm -f "$T"; exit 74; }; echo "@@BAK $BK"; fi; '
+              '$F tee "$P" < "$T" > /dev/null; rc=$?; rm -f "$T"; [ $rc = 0 ] || exit 73; '
+              '[ -n "$F" ] && echo @@SUDO; echo "@@SHA $($F sha256sum "$P" | cut -d" " -f1)"')
+    rc, out, err = srun(s, script, timeout=120, data=data, lazy=True)
+    if rc == 77 and _sudo_locked(s):
+        raise NeedSudo(s)
+    msg = {75: "the file was changed on the server after you opened it. Reload it (copy your edits first) and try again.",
+           77: "you have no permission to write this file, and no sudo on this server.",
+           74: "could not create the backup copy, so nothing was saved.",
+           73: "writing the file failed.", 70: "could not create a temporary file on the server."}
+    if rc != 0:
+        raise RemoteError(msg.get(rc, "") + (" " + err.strip()[-300:] if err.strip() else "") or f"save failed (exit {rc})")
+    res = {"backup": None, "sha": None, "sudo": False}
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("@@BAK "):
+            res["backup"] = line[6:]
+        elif line.startswith("@@SHA "):
+            res["sha"] = line[6:]
+        elif line == "@@SUDO":
+            res["sudo"] = True
+    if res["sha"] != hashlib.sha256(data).hexdigest():
+        raise RemoteError("saved, but the file on the server doesn't match what was sent - please reload and check it.")
+    return res
+
+
+ROUTES.update({"/api/fread": r_fread, "/api/fdiff": r_fdiff, "/api/fwrite": r_fwrite})
 
 
 # ---- files inside a container (docker exec for listing, docker cp for download) ----
@@ -2032,7 +2139,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .palnote{padding:8px 14px;color:var(--mut);font-size:12px;display:flex;gap:8px;align-items:center}
 @media (max-width:800px){.rwrap{grid-template-columns:1fr}.rleft{border-right:0;max-height:200px}.dkgrid{grid-template-columns:1fr}}
 .fblist{margin-top:10px;border:1px solid var(--line);border-radius:12px;max-height:58vh;overflow-y:auto;overflow-x:hidden}.fbown{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fbrow{display:grid;grid-template-columns:22px minmax(140px,1fr) 64px 70px 100px 236px;gap:12px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.fbrow{display:grid;grid-template-columns:22px minmax(140px,1fr) 64px 70px 100px 300px;gap:12px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
 .fbrow:hover{background:rgba(124,92,255,.07)}.fbrow:last-child{border-bottom:0}
 .fbrow.dir .fbic{color:#b9a9ff}.fbrow.file .fbic{color:var(--mut)}.fbrow .fbic{display:inline-flex}
 .fbname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:12.5px}.fbrow.dir .fbname{font-weight:600;color:var(--fg)}
@@ -2087,6 +2194,9 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .note.warn{border-left-color:var(--warn)}.note.bad{border-left-color:var(--bad);background:rgba(255,77,109,.06)}.note.good{border-left-color:var(--ok);background:rgba(34,227,161,.06)}
 #editor{flex:1;min-height:360px;display:flex}
 #editor .CodeMirror,#editor textarea{flex:1;height:auto;min-height:360px;border:1px solid var(--line2);border-radius:12px;font:12.5px/1.6 var(--mono)}
+#edwrap .CodeMirror{height:62vh;border:1px solid var(--line2);border-radius:12px;font:12.5px/1.6 var(--mono);background:#05060a}
+#edwrap .CodeMirror-gutters{background:#05060a;border-right:1px solid var(--line)}
+#edrev pre.diff{max-height:56vh;overflow:auto}
 #editor .CodeMirror{background:#05060a}#editor .CodeMirror-gutters{background:#05060a;border-right:1px solid var(--line)}
 #editor textarea{width:100%;background:#05060a;color:var(--fg);padding:12px;resize:none;outline:none}
 .diff .a{color:var(--ok);background:rgba(34,227,161,.07);display:inline-block;width:100%}.diff .d{color:#ff7d93;background:rgba(255,77,109,.07);display:inline-block;width:100%}.diff .h{color:#7fb4ff}
@@ -3170,15 +3280,92 @@ function fbRender(){const d=FB.data;if(!d)return;
      <span class="fbic">${ic(it.type==='dir'?'folder':it.type==='link'?'chev':'file',15)}</span>
      <span class="fbname" title="${esc(it.name)}">${esc(it.name)}</span>
      <span class="dim small mono">${it.type==='dir'?'':fmtB(it.size)}</span><span class="dim small">${when(it.mtime)}</span><span class="dim small mono fbown" title="${esc(it.owner)}">${esc(it.owner)}</span>
-     <span class="fbacts">${it.type==='file'?`${it.size<=50e6?`<button class="btn sm" data-fa="copy" title="Copy file content to clipboard">${ic('copy',13)} Copy</button>`:''}<button class="btn sm" data-fa="view" title="Open in a new browser tab">${ic('file',13)}</button><button class="btn sm primary" data-fa="dl">${ic('download',13)} Download</button>`:FB.c&&it.type==='dir'?`<button class="btn sm" data-fa="tar" title="Download this whole folder as a .tar file">${ic('download',13)} .tar</button>`:''}</span></div>`).join('')
+     <span class="fbacts">${it.type==='file'?`${!FB.c&&it.size<=5*1048576?`<button class="btn sm" data-fa="edit" title="Edit this file">${ic('edit',13)} Edit</button>`:''}${it.size<=50e6?`<button class="btn sm" data-fa="copy" title="Copy file content to clipboard">${ic('copy',13)} Copy</button>`:''}<button class="btn sm" data-fa="view" title="Open in a new browser tab">${ic('file',13)}</button><button class="btn sm primary" data-fa="dl">${ic('download',13)} Download</button>`:FB.c&&it.type==='dir'?`<button class="btn sm" data-fa="tar" title="Download this whole folder as a .tar file">${ic('download',13)} .tar</button>`:''}</span></div>`).join('')
    ||'<div class="dim" style="padding:20px;text-align:center">Empty folder</div>'}
 async function fbAct(a,full,it){
+  if(a==='edit')return fbEdit(full,it);
   if(a==='dl'||a==='tar'){const x=document.createElement('a');x.href=dlUrl(FB.server,full,false,FB.c,a==='tar'?'dir':'file');x.download=it.name+(a==='tar'?'.tar':'');document.body.appendChild(x);x.click();x.remove();
     toast(`Downloading <b>${esc(it.name)}${a==='tar'?'.tar':''}</b>${it.size!=null&&a==='dl'?` (${fmtB(it.size)})`:''}`,'ok');return}
   if(a==='view'){window.open(dlUrl(FB.server,full,true,FB.c),'_blank');return}
   if(a==='copy'){try{const r=await fetch(dlUrl(FB.server,full,true,FB.c));if(!r.ok)throw new Error(await r.text());const t=await r.text();
       await navigator.clipboard.writeText(t);toast(`Copied <b>${esc(it.name)}</b> — ${t.split('\n').length.toLocaleString()} lines`,'ok')}
     catch(e){toast('Copy failed: '+esc(e.message),'bad')}}}
+
+// ---------- edit a file on the server ----------
+const CM_BASE='https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/';
+const CM_EXT={yml:'yaml',yaml:'yaml',json:'javascript',js:'javascript',mjs:'javascript',cjs:'javascript',ts:'javascript',
+  sh:'shell',bash:'shell',zsh:'shell',env:'shell',py:'python',conf:'nginx',xml:'xml',svg:'xml',html:'xml',css:'css',sql:'sql',
+  ini:'properties',cfg:'properties',properties:'properties',toml:'toml',md:'markdown',service:'properties',timer:'properties'};
+const CM_DEPS={dockerfile:['addon/mode/simple.min.js']};
+const cmLoaded={yaml:true};
+function cmMode(name,path){const n=name.toLowerCase();
+  if(n==='dockerfile'||n.startsWith('dockerfile.')||n.endsWith('.dockerfile'))return'dockerfile';
+  if(/^\.(bashrc|bash_profile|profile|zshrc|bash_logout|bash_aliases)$/.test(n)||n.startsWith('.env')||n==='crontab')return'shell';
+  if(/\/nginx\//.test(path)||/\/(sites-available|sites-enabled|conf\.d)\//.test(path))return'nginx';
+  if(n==='.gitconfig'||n==='.gitmodules')return'properties';
+  return CM_EXT[n.includes('.')?n.split('.').pop():'']||null}
+function cmLoad(mode){if(!mode||!window.CodeMirror)return Promise.resolve(null);if(cmLoaded[mode])return Promise.resolve(mode);
+  const add=src=>new Promise((res,rej)=>{const e=document.createElement('script');e.src=CM_BASE+src;e.onload=res;e.onerror=rej;document.head.appendChild(e)});
+  return (CM_DEPS[mode]||[]).reduce((p,d)=>p.then(()=>add(d)),Promise.resolve()).then(()=>add(`mode/${mode}/${mode}.min.js`))
+    .then(()=>{cmLoaded[mode]=true;return mode}).catch(()=>null)}
+function edDirty(){return !!(FB.ed&&FB.ed.cm&&FB.ed.cm.getValue()!==FB.ed.orig)}
+async function edLeave(){return !edDirty()||await new Promise(res=>{
+  const bar=document.createElement('div');bar.className='note warn';bar.style.margin='10px 0';
+  bar.innerHTML=`You have <b>unsaved changes</b>. Leave and lose them?<span style="float:right;display:flex;gap:6px"><button class="btn ghost sm" id="lvno">Keep editing</button><button class="btn danger sm" id="lvyes">Discard</button></span>`;
+  const host=$('#edwrap');if(!host){res(true);return}host.before(bar);$('#lvno').focus();
+  $('#lvno').onclick=()=>{bar.remove();res(false)};$('#lvyes').onclick=()=>{bar.remove();res(true)}})}
+function fbEdit(full,it){const dir=full.replace(/\/[^\/]*$/,'')||'/';
+  FB.ed={path:full,name:it.name,dir,cm:null,orig:'',sha:'',writable:'no'};
+  modal(`<h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('edit',18)}</span> <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Edit <code>${esc(full)}</code></span> <span class="dim" style="font-weight:500">· ${esc(FB.server)}</span></h3>
+   <div class="row" style="gap:8px;margin-top:4px;flex-wrap:wrap"><button class="btn sm" id="edback">${ic('back',13)} Files</button>
+     <span id="ednote" class="dim small grow"></span>
+     <label class="toggle" title="Before saving, copy the current file to ${esc(it.name)}.bak.<date> next to it"><input type="checkbox" id="edbak" checked><span></span>Keep backup</label>
+     <button class="btn sm" id="edreload" title="Load the file again from the server">${ic('restart',13)} Reload</button>
+     <button class="btn sm primary" id="edreview" disabled>${ic('check',13)} Review &amp; save</button></div>
+   <div id="edwrap" style="margin-top:10px"><div class="sk" style="height:62vh;border-radius:12px"></div></div>
+   <div id="edrev" class="hidden" style="margin-top:10px"></div>
+   <div class="row end" style="margin-top:10px"><button class="btn ghost" id="mno">Close</button></div>`,'xl');
+  $('#mno').onclick=async()=>{if(await edLeave()){FB.ed=null;closeModal()}};
+  $('#edback').onclick=async()=>{if(await edLeave()){FB.ed=null;openFiles(FB.server,dir)}};
+  $('#edreload').onclick=async()=>{if(await edLeave())edLoad()};
+  $('#edreview').onclick=()=>edReview();
+  edLoad()}
+async function edLoad(){const E=FB.ed;if(!E)return;$('#edrev').classList.add('hidden');const w=$('#edwrap');w.classList.remove('hidden');
+  w.innerHTML='<div class="sk" style="height:62vh;border-radius:12px"></div>';$('#edreview').disabled=true;
+  let j;try{j=await api('/api/fread',{server:FB.server,path:E.path})}catch(e){w.innerHTML=`<div class="note bad">${esc(e.message)}</div>`;return}
+  if(FB.ed!==E)return;
+  E.orig=j.content;E.sha=j.sha;E.writable=j.writable;E.path=j.path||E.path;
+  const mode=await cmLoad(cmMode(E.name,E.path));
+  const ro=j.writable==='no';
+  const note=()=>{$('#ednote').innerHTML=[edDirty()&&'<b style="color:var(--warn)">● unsaved changes</b>',j.sudo&&`${ic('lock',12)} read with sudo`,
+    ro?'<b>read-only</b>: you have no permission to save this file':j.writable==='sudo'&&'saves with sudo',
+    !ro&&'<kbd>Ctrl</kbd> <kbd>S</kbd> to review'].filter(Boolean).join(' · ')};
+  w.innerHTML='';
+  if(window.CodeMirror){E.cm=CodeMirror(w,{value:j.content,mode:mode||null,theme:'material-darker',lineNumbers:true,readOnly:ro,indentUnit:2,tabSize:4,
+      lineSeparator:j.content.includes('\r\n')?'\r\n':null,extraKeys:{'Ctrl-S':()=>edReview(),'Cmd-S':()=>edReview()}});
+    E.cm.on('change',()=>{$('#edreview').disabled=ro||!edDirty();note()});setTimeout(()=>{E.cm&&E.cm.refresh();E.cm&&E.cm.focus()},30)}
+  else{const ta=document.createElement('textarea');ta.spellcheck=false;ta.value=j.content;ta.readOnly=ro;ta.style.cssText='width:100%;height:62vh;font:12.5px/1.6 var(--mono)';w.appendChild(ta);
+    E.cm={getValue:()=>ta.value,refresh(){},focus:()=>ta.focus()};ta.oninput=()=>{$('#edreview').disabled=ro||!edDirty();note()};
+    ta.onkeydown=e=>{if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();edReview()}}}
+  note()}
+async function edReview(){const E=FB.ed;if(!E||!E.cm||E.writable==='no')return;const content=E.cm.getValue();
+  if(content===E.orig){toast('No changes to save','info',2000);return}
+  let j;try{j=await api('/api/fdiff',{orig:E.orig,content,name:E.name})}catch(e){toast(esc(e.message),'bad');return}
+  const r=$('#edrev');$('#edwrap').classList.add('hidden');r.classList.remove('hidden');const bak=$('#edbak').checked;
+  r.innerHTML=`<div class="mut small" style="font-weight:600;letter-spacing:1px">CHANGES</div><pre class="term chrome diff">${diffHtml(j.diff)}</pre>
+    <div class="note ${bak?'good':'warn'}" style="margin-top:8px">${bak?`A backup of the current file is saved next to it as <code>${esc(E.name)}.bak.&lt;date&gt;</code>.`:'<b>No backup</b> will be made (the "Keep backup" switch is off).'}${E.writable==='sudo'?' The file is saved with sudo; its owner and permissions stay the same.':' Its owner and permissions stay the same.'}</div>
+    <div class="row end" style="margin-top:8px"><button class="btn ghost" id="edback2">${ic('back',14)} Back to editor</button><button class="btn primary" id="edsave">${ic('check',15)} Save to server</button></div>`;
+  $('#edback2').onclick=()=>{r.classList.add('hidden');$('#edwrap').classList.remove('hidden');E.cm.refresh();E.cm.focus()};
+  $('#edsave').onclick=e=>edSave(e.currentTarget,content)}
+async function edSave(btn,content){const E=FB.ed;if(!E)return;
+  await busy(btn,async()=>{try{const j=await api('/api/fwrite',{server:FB.server,path:E.path,content,sha:E.sha,backup:$('#edbak').checked});
+      E.orig=content;E.sha=j.sha;toast(`Saved <b>${esc(E.name)}</b>`,'ok');
+      $('#edrev').innerHTML=`<div class="note good">${ic('check',15)} <b>Saved</b> <code>${esc(FB.server)}:${esc(E.path)}</code>${j.sudo?' <span class="mut">(with sudo)</span>':''}
+        ${j.backup?`<br><span class="mut small">Backup: <code>${esc(j.backup)}</code></span>`:''}</div>
+        <div class="row" style="margin-top:8px"><button class="btn primary" id="edmore">${ic('edit',14)} Continue editing</button><button class="btn ghost" id="edfiles">${ic('back',14)} Back to files</button></div>`;
+      $('#edmore').onclick=()=>{$('#edrev').classList.add('hidden');$('#edwrap').classList.remove('hidden');$('#edreview').disabled=true;E.cm.refresh();E.cm.focus();$('#ednote').innerHTML=''};
+      $('#edfiles').onclick=()=>{FB.ed=null;openFiles(FB.server,E.dir)}}
+    catch(e){$('#edrev').insertAdjacentHTML('afterbegin',`<div class="note bad" style="margin-bottom:8px">${esc(e.message)}</div>`)}})}
 // live stats
 async function fetchStats(servers){
   await Promise.all(servers.map(async s=>{try{const j=await raw('/api/stats',{server:s});if(j.ok)for(const[n,v] of Object.entries(j.stats))S.stats[s+'/'+n]=v}catch(e){}}));
@@ -3442,7 +3629,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='/'&&!typing&&S.view==='list'){e.preventDefault();$('#q').focus()}
 });
 window.addEventListener('resize',moveInk);
-window.addEventListener('beforeunload',e=>{if(dirty()){e.preventDefault();e.returnValue=''}});
+window.addEventListener('beforeunload',e=>{if(dirty()||edDirty()){e.preventDefault();e.returnValue=''}});
 loadHome();
 </script></body></html>"""
 
