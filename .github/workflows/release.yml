@@ -123,6 +123,7 @@ jobs:
       - name: Build and publish to gh-pages
         if: steps.key.outputs.ok
         run: |
+          command -v apt-ftparchive >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq apt-utils; }
           printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
           packaging/apt/build-repo.sh debs site
           cd site

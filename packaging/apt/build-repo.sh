@@ -6,6 +6,7 @@
 # The signing key must already be in gpg (APT_KEY_ID picks one if there are several).
 # Output:  <site>/apt/{*.deb,Packages,Packages.gz,Release,InRelease,Release.gpg}, <site>/dctl.gpg, <site>/index.html
 set -eu
+command -v apt-ftparchive >/dev/null || { echo "apt-ftparchive not found: sudo apt-get install apt-utils" >&2; exit 1; }
 DEBS=$1; SITE=$2
 KEY=${APT_KEY_ID:-$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1=="fpr"{print $10; exit}')}
 [ -n "$KEY" ] || { echo "no gpg secret key found" >&2; exit 1; }
