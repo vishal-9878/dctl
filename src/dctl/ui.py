@@ -2339,6 +2339,8 @@ kbd{font:500 10.5px var(--mono);padding:2px 6px;border-radius:5px;border:1px sol
 .ptabs a{display:flex;align-items:center;gap:7px;padding:6px 14px;border-radius:8px;cursor:pointer;color:var(--mut);font-weight:600;font-size:13px;transition:.15s}
 .ptabs a:hover{color:var(--fg)}.ptabs a.on{background:linear-gradient(135deg,rgba(124,92,255,.35),rgba(34,211,238,.18));color:var(--fg);box-shadow:inset 0 0 0 1px rgba(124,92,255,.45)}
 .ptabs .mi{display:inline-flex}
+.ptabs a{padding:5px 12px}.plogo{display:inline-flex;height:22px;align-items:center;justify-content:center}.plogo svg{height:22px;width:auto;display:block}
+.ptabs a .plogo{filter:grayscale(.7);opacity:.55;transition:.15s}.ptabs a:hover .plogo{filter:none;opacity:.85}.ptabs a.on .plogo{filter:drop-shadow(0 0 6px rgba(80,140,255,.45));opacity:1}
 .gsec{margin-bottom:26px}
 .gsh{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .gsh b{font-size:15px}.gsh .gacts{display:flex;gap:6px;opacity:.55;transition:.15s}.gsh:hover .gacts{opacity:1}
@@ -2587,7 +2589,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 <div class="bg"><i></i><i></i><i></i></div>
 <header class="top">
   <div class="brand" id="logo"><img src="/icon.png" alt="" class="logo-img"><span>dctl</span></div>
-  <nav class="ptabs" id="ptabs"><a data-pg="docker"><span class="mi" data-i="box"></span>Docker</a><a data-pg="pm2"><span class="mi" data-i="bolt"></span>PM2</a><a data-pg="k8s"><span class="mi" data-i="k8s"></span>Kubernetes</a></nav>
+  <nav class="ptabs" id="ptabs"><a data-pg="docker" title="Docker" aria-label="Docker"><span class="plogo" data-l="docker"></span></a><a data-pg="pm2" title="PM2" aria-label="PM2"><span class="plogo" data-l="pm2"></span></a><a data-pg="k8s" title="Kubernetes" aria-label="Kubernetes"><span class="plogo" data-l="k8s"></span></a></nav>
   <nav id="crumb"></nav>
   <span class="grow"></span>
   <button class="btn ghost" id="toprun" title="Run a command on one or many servers"></button>
@@ -3062,6 +3064,11 @@ $('#rescan').onclick=()=>S.mode==='pm2'?pm2Scan():S.dtab!=='containers'?loadRes(
 
 // ---------- PM2 ----------
 $$('#mseg .mi,#ptabs .mi').forEach(x=>x.innerHTML=ic(x.dataset.i,14));
+const LOGO={
+ docker:'<svg viewBox="0 0 26 20"><g fill="#2496ED"><rect x="3.2" y="8.2" width="2.6" height="2.4" rx=".3"/><rect x="6.3" y="8.2" width="2.6" height="2.4" rx=".3"/><rect x="9.4" y="8.2" width="2.6" height="2.4" rx=".3"/><rect x="12.5" y="8.2" width="2.6" height="2.4" rx=".3"/><rect x="15.6" y="8.2" width="2.6" height="2.4" rx=".3"/><rect x="6.3" y="5.3" width="2.6" height="2.4" rx=".3"/><rect x="9.4" y="5.3" width="2.6" height="2.4" rx=".3"/><rect x="12.5" y="5.3" width="2.6" height="2.4" rx=".3"/><rect x="12.5" y="2.4" width="2.6" height="2.4" rx=".3"/><path d="M1 11.4h18.6c.5-1.5 1.8-2.4 3.2-2.2.6.1 1.2.4 1.6.8l.6.6-.7.4c-.6.3-1.3.5-2 .5-1.4 4.8-5.6 7.6-11.5 7.6C4.4 19.1 1.4 16 1 11.4z"/></g><circle cx="7" cy="14.2" r=".9" fill="#0b0d15"/></svg>',
+ pm2:'<svg viewBox="0 0 34 20"><defs><linearGradient id="lgpm2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b4cff"/><stop offset="1" stop-color="#2d9cdb"/></linearGradient></defs><rect x="1" y="1" width="32" height="18" rx="5" fill="url(#lgpm2)"/><text x="17" y="14.2" text-anchor="middle" font-family="Inter,system-ui,sans-serif" font-size="10.5" font-weight="800" fill="#fff" letter-spacing=".3">PM2</text></svg>',
+ k8s:'<svg viewBox="0 0 24 24"><path fill="#326CE5" d="M12 1.2l9 4.3 2.2 9.8-6.2 7.8H7l-6.2-7.8L3 5.5z"/><g fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12.4" r="4.4"/><path d="M12 5.4v4.4M12 15v4.2M5.5 9.2l4.1 2.1M14.4 13.6l4.1 2M18.5 9.2l-4.1 2.1M9.6 13.6l-4.1 2M8 18l2.5-3.6M16 18l-2.5-3.6"/></g><circle cx="12" cy="12.4" r="1.3" fill="#fff"/></svg>'};
+$$('#ptabs .plogo').forEach(x=>x.innerHTML=LOGO[x.dataset.l]);
 const fmtB=b=>{if(b==null)return'–';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<4){b/=1024;i++}return (i?b.toFixed(b<10?1:0):b)+' '+u[i]};
 const pRun=p=>p.status==='online'||p.status==='launching';
 const pKey=p=>p.user+'|'+p.home+'|'+p.id;
