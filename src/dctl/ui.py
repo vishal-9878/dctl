@@ -2122,7 +2122,7 @@ HTML = r"""<!doctype html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <style>
-:root{
+:root{color-scheme:dark;
   --bg:#06070c;--bg2:#0b0d15;--glass:rgba(20,23,36,.62);--glass2:rgba(30,34,52,.55);--line:rgba(255,255,255,.07);--line2:rgba(255,255,255,.12);
   --fg:#eceef6;--mut:#8a8fa8;--dim:#5d627a;
   --a1:#7c5cff;--a2:#00d4ff;--grad:linear-gradient(135deg,#7c5cff 0%,#4f8bff 50%,#00d4ff 100%);
@@ -2161,6 +2161,15 @@ button,input,select{font:inherit;color:inherit}
 .icon-btn:hover{color:var(--fg);border-color:var(--line2)}
 input[type=text],input[type=password],input:not([type]),select{background:rgba(8,10,18,.7);border:1px solid var(--line2);border-radius:10px;padding:8px 12px;outline:none;transition:.15s}
 input:focus,select:focus{border-color:var(--a1);box-shadow:0 0 0 3px rgba(124,92,255,.2)}
+select{-webkit-appearance:none;appearance:none;color:var(--fg);padding-right:34px;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8fa8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+select option{background:#141724;color:var(--fg)}
+input[type=checkbox]{-webkit-appearance:none;appearance:none;width:16px;height:16px;flex:none;margin:0;padding:0;border:1.5px solid rgba(255,255,255,.28);border-radius:5px;background:rgba(8,10,18,.7);cursor:pointer;display:inline-grid;place-content:center;vertical-align:-3px;transition:.15s}
+input[type=checkbox]:hover{border-color:var(--a1)}
+input[type=checkbox]:checked{background:var(--grad);border-color:transparent}
+input[type=checkbox]:checked::after{content:"";width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
+input[type=checkbox]:indeterminate{background:var(--grad);border-color:transparent}
+input[type=checkbox]:indeterminate::after{content:"";width:8px;height:2px;background:#fff}
+input[type=checkbox]:disabled{opacity:.35;cursor:not-allowed}
 kbd{font:500 10.5px var(--mono);padding:2px 6px;border-radius:5px;border:1px solid var(--line2);background:rgba(255,255,255,.04);color:var(--mut)}
 .spin{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:rot .7s linear infinite;vertical-align:-2px}
 @keyframes rot{to{transform:rotate(360deg)}}
@@ -2462,7 +2471,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .box h3{margin:0 0 6px;font-size:17px;display:flex;align-items:center;gap:10px}
 .box p{margin:6px 0 14px;color:var(--mut)}
 .form label{display:block;color:var(--mut);margin:12px 0 5px;font-size:12px;font-weight:500}
-.form input{width:100%}
+.form input:not([type=checkbox]){width:100%}
 .form .two{display:grid;grid-template-columns:1fr 96px;gap:10px}
 .err{color:#ff8aa0;min-height:18px}
 .palbox{width:min(640px,94vw);background:rgba(16,18,28,.97);border:1px solid var(--line2);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;animation:pop .2s}
