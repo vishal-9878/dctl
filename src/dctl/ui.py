@@ -2436,6 +2436,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .hidnote{display:flex;align-items:center;gap:8px;padding:12px 16px;color:var(--mut);font-size:13px}.hidnote a{color:#b3a6ff;cursor:pointer;font-weight:600}.hidnote a:hover{text-decoration:underline}
 #termp{position:fixed;inset:0;z-index:60;background:rgba(3,4,8,.55);backdrop-filter:blur(3px);display:flex;align-items:flex-end;justify-content:center;padding:70px 24px 24px}
 #termp.hidden{display:none}
+.tauto{font-size:12.5px;margin:0 6px;white-space:nowrap}.tauto span{transform:scale(.85)}
 .tpbox{width:min(1400px,100%);height:min(78vh,900px);display:flex;flex-direction:column;border-radius:14px;overflow:hidden;border:1px solid var(--line2);background:#05060a;box-shadow:0 30px 80px -20px rgba(0,0,0,.8),0 0 0 1px rgba(124,92,255,.15);animation:rise .25s both}
 #termp.full{padding:0}#termp.full .tpbox{width:100%;height:100%;border-radius:0}
 .tphead{display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,255,255,.03);border-bottom:1px solid var(--line)}
@@ -2623,6 +2624,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
     <button class="btn ghost sm hidden" id="trecon">Reconnect</button>
     <button class="btn ghost sm" id="tfiles" title="Browse / download files of this server">Files</button>
     <button class="btn ghost sm" id="tsudo" title="Become root on this server (asks your sudo password in the terminal)">sudo -i</button>
+    <label class="toggle tauto" title="Selected text is copied to the clipboard automatically. Ctrl+Shift+C copies, Ctrl+Shift+V or right-click pastes."><input type="checkbox" id="tauto"><span></span>Copy on select</label>
     <button class="btn ghost sm" id="tnew" title="Another session on this server">+ New</button>
     <button class="btn ghost sm" id="tfull" title="Full screen">⤢</button>
     <button class="btn ghost sm" id="tmin" title="Hide — sessions keep running">Minimize</button></div>
@@ -3485,6 +3487,13 @@ async function openTerm(server,opts){opts=opts||{};
   const tab={id,server,container:opts.container||'',el,term,fit,ws:null,state:'connecting'};T.tabs.push(tab);
   showTermPanel();activateTerm(id);connectTerm(tab);
   term.onData(d=>{if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x00'+d)});
+  term.attachCustomKeyEventHandler(e=>{if(e.type!=='keydown'||!e.ctrlKey||e.altKey||e.metaKey)return true;const k=e.key.toLowerCase();
+    if(e.shiftKey&&k==='c'){e.preventDefault();termCopy(term);return false}                 // Ctrl+Shift+C: copy
+    if(e.shiftKey&&k==='v'){e.preventDefault();termPaste(term);return false}                // Ctrl+Shift+V: paste
+    if(!e.shiftKey&&k==='c'&&term.hasSelection()){e.preventDefault();termCopy(term);term.clearSelection();return false}  // Ctrl+C with a selection copies, otherwise it interrupts
+    return true});
+  el.addEventListener('mouseup',e=>{if(e.button===0&&termAuto())setTimeout(()=>{if(term.hasSelection())termCopy(term,true)},0)});
+  el.addEventListener('contextmenu',e=>{e.preventDefault();if(term.hasSelection()){termCopy(term);term.clearSelection()}else termPaste(term)});
   term.onResize(({cols,rows})=>{if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x01'+JSON.stringify({c:cols,r:rows}))});
 }
 function connectTerm(tab){
@@ -3496,6 +3505,21 @@ function connectTerm(tab){
   ws.onclose=()=>{if(tab.ws!==ws)return;tab.state='closed';renderTermTabs();tab.term.write('\r\n\x1b[33mDisconnected.\x1b[0m Press \x1b[1mReconnect\x1b[0m to start a new session.\r\n')};
 }
 function curTab(){return T.tabs.find(t=>t.id===T.cur)}
+T.auto=(()=>{try{return localStorage.getItem('dctl.autocopy')!=='0'}catch(_){return true}})();
+function termAuto(){return T.auto}
+async function clipWrite(txt){
+  try{await navigator.clipboard.writeText(txt);return true}catch(_){}
+  const a=document.createElement('textarea');a.value=txt;a.style.cssText='position:fixed;top:-1000px;opacity:0';document.body.appendChild(a);a.select();
+  let ok=false;try{ok=document.execCommand('copy')}catch(_){}a.remove();return ok}
+async function termCopy(term,quiet){const txt=term.getSelection();if(!txt)return;const ok=await clipWrite(txt);term.focus();
+  if(!ok)return toast('Could not copy to the clipboard','bad');
+  const n=txt.split('\n').length;toast(n>1?`Copied ${n} lines`:'Copied','ok',1200)}
+async function clipRead(){
+  try{const t=await navigator.clipboard.readText();if(t)return t}catch(_){}
+  const a=document.createElement('textarea');a.style.cssText='position:fixed;top:-1000px;opacity:0';document.body.appendChild(a);a.focus();   // app window (WebKitGTK): readText comes back empty, execCommand works
+  let t=null;try{if(document.execCommand('paste'))t=a.value}catch(_){}a.remove();return t}
+async function termPaste(term){const txt=await clipRead();term.focus();
+  if(txt===null)return toast('Could not read the clipboard','bad');if(txt)term.paste(txt)}
 function activateTerm(id){T.cur=id;T.tabs.forEach(t=>t.el.classList.toggle('on',t.id===id));renderTermTabs();
   const t=curTab();if(t)requestAnimationFrame(()=>{try{t.fit.fit()}catch(_){}t.term.focus()})}
 function renderTermTabs(){
@@ -3514,6 +3538,8 @@ $('#tmin').onclick=hideTermPanel;$('#tfiles').onclick=()=>{const t=curTab();if(t
 $('#tnew').onclick=()=>{const t=curTab();if(t)openTerm(t.server,{container:t.container})};
 $('#trecon').onclick=()=>{const t=curTab();if(t){t.term.reset();connectTerm(t)}};
 $('#tsudo').onclick=()=>{const t=curTab();if(t&&t.ws&&t.ws.readyState===1){t.ws.send('\x00sudo -i\r');t.term.focus()}};
+$('#tauto').checked=termAuto();$('#tauto').onchange=e=>{T.auto=e.target.checked;try{localStorage.setItem('dctl.autocopy',e.target.checked?'1':'0')}catch(_){}
+  toast(e.target.checked?'Selected text is copied automatically':'Copy on select is off — use Ctrl+Shift+C','info',2200);const t=curTab();if(t)t.term.focus()};
 $('#tfull').onclick=()=>{$('#termp').classList.toggle('full');const t=curTab();if(t)setTimeout(()=>{try{t.fit.fit()}catch(_){}},60)};
 window.addEventListener('resize',()=>{const t=curTab();if(t&&!$('#termp').classList.contains('hidden'))try{t.fit.fit()}catch(_){}});
 window.addEventListener('beforeunload',e=>{if(T.tabs.some(t=>t.state==='open')){e.preventDefault();e.returnValue=''}});
