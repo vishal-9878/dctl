@@ -44,7 +44,7 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 - **Run a command on many servers at once**, with saved commands.
 - **Global search** (`Ctrl K`) over servers, containers, PM2 processes and ports.
 - **Pages and groups**: separate Docker and PM2 pages, with your own groups (Production, Staging, …).
-- Add servers from the UI (host, user, port, key or one-time password, optional **jump host / bastion**), or just use your `~/.ssh/config`.
+- Add servers from the UI (host, user, port, key or one-time password, optional **jump host / bastion**), or just use your `~/.ssh/config`. Made a typo? Open the server menu and press **Edit** to change any of it, including the name (dctl tests the new details before saving).
 
 ---
 

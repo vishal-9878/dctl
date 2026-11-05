@@ -629,16 +629,19 @@ def install_key(tgt, pw, pub):
         raise RemoteError("password login failed: " + ("wrong user or password" if "denied" in last else last))
 
 
-def r_server_add(d):
+def _server_entry(d, old=None):
+    """Validate the Add/Edit server form. `old` is the current name when editing (it may keep that name)."""
     name, host = d.get("name", "").strip(), d.get("host", "").strip()
-    user, key, pw = d.get("user", "").strip(), d.get("key", "").strip(), d.get("password", "")
+    user, key = d.get("user", "").strip(), d.get("key", "").strip()
     try:
         port = int(d.get("port") or 22)
     except ValueError:
         raise RemoteError("port must be a number")
+    if not 0 < port < 65536:
+        raise RemoteError("port must be 1-65535")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", name):
         raise RemoteError("Name: use letters, numbers, . _ - (no spaces)")
-    if name in servers():
+    if name != old and name in servers():
         raise RemoteError(f"a server named '{name}' already exists")
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", host):
         raise RemoteError("Host: enter an IP or hostname")
@@ -649,14 +652,27 @@ def r_server_add(d):
     jump = d.get("jump", "").strip()
     if jump and not (any(a["name"] == jump for a in added_servers()) or JUMP_RE.fullmatch(jump)):
         raise RemoteError("Jump host: use a server name from dctl or ~/.ssh/config, or user@host:port")
-    if jump == name:
+    if jump in (name, old):
         raise RemoteError("a server can't be its own jump host")
+    if old and jump:                       # no loops: the jump host must not go through this server
+        seen, j = set(), jump
+        while j and j not in seen:
+            seen.add(j)
+            if j == old:
+                raise RemoteError(f"{jump} is itself reached through {old} - pick another jump host")
+            j = next((a.get("jump") for a in added_servers() if a["name"] == j), None)
     entry = {"name": name, "host": host, "user": user, "port": port, "key": key}
     if jump:
         entry["jump"] = jump
+    return entry
+
+
+def _test_connect(entry, pw):
+    """Install our key with the password (if given), then check a password-less login works."""
     tgt = target_for(entry)
+    jump = entry.get("jump")
     if pw:
-        install_key(tgt, pw, ensure_pubkey(key or None))
+        install_key(tgt, pw, ensure_pubkey(entry.get("key") or None))
     p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ControlMaster=no",
                         "-o", "ControlPath=none"] + tgt + ["true"], capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
@@ -668,12 +684,75 @@ def r_server_add(d):
         if jump:
             hint += f" (check that `ssh {jump}` works without a password)"
         raise RemoteError(f"could not connect: {last}{hint}")
+
+
+def r_server_add(d):
+    entry = _server_entry(d)
+    name = entry["name"]
+    _test_connect(entry, d.get("password", ""))
     lst = added_servers(); lst.append(entry); save_added(lst)
     probe(name)
     if d.get("page") in PAGES:
         with LAYOUT_LOCK:
             lay = ensure_layout(); place(lay, d["page"], name, (d.get("group") or "").strip()); save_layout(lay)
     return {"server": name}
+
+
+def r_server_get(d):
+    a = next((x for x in added_servers() if x["name"] == d.get("name")), None)
+    if not a:
+        raise RemoteError("only servers added from dctl can be edited here - for others edit ~/.ssh/config")
+    return {k: a.get(k, "") for k in ("name", "host", "user", "port", "key", "jump")}
+
+
+def r_server_edit(d):
+    old = d.get("old")
+    lst = added_servers()
+    i = next((n for n, a in enumerate(lst) if a["name"] == old), None)
+    if i is None:
+        raise RemoteError("only servers added from dctl can be edited here - for others edit ~/.ssh/config")
+    guard(d, old, "edit the connection details")
+    entry = _server_entry(d, old)
+    name, prev = entry["name"], lst[i]
+    conn = lambda a: tuple(a.get(k) or "" for k in ("host", "user", "port", "key", "jump"))
+    changed = conn(prev) != conn(entry)
+    if changed or d.get("password"):
+        _test_connect(entry, d.get("password", ""))
+    if changed and not IS_WIN:             # drop the shared connection that still uses the old details
+        try:
+            subprocess.run(SSH + ["-O", "exit"] + target_for(prev), capture_output=True, timeout=5)
+        except Exception:
+            pass
+    lst = added_servers()
+    for n, a in enumerate(lst):
+        if a["name"] == old:
+            lst[n] = entry
+        elif a.get("jump") == old and name != old:
+            a["jump"] = name               # servers reached through this one follow the rename
+    save_added(lst)
+    if name != old:
+        with LAYOUT_LOCK:
+            lay = load_layout()
+            if lay:
+                for pg in PAGES:
+                    P = lay[pg]
+                    for arr in [P["ungrouped"]] + [g["servers"] for g in P["groups"]]:
+                        arr[:] = [name if x == old else x for x in arr]
+                save_layout(lay)
+        p = protected()
+        if old in p:
+            p.discard(old); p.add(name); save_protected(p)
+        if old in SUDO_PW and not changed:
+            SUDO_PW[name] = SUDO_PW[old]
+    if changed or name != old:
+        for m in (INFO, SUDO_PW, HOSTS):
+            m.pop(old, None)
+        HOSTS.pop(name, None)
+        with LOCK:
+            for k in [k for k in CONTAINERS if k[0] == old]:
+                del CONTAINERS[k]
+        probe(name)
+    return {"server": name, "renamed": name != old}
 
 
 def r_server_remove(d):
@@ -1388,6 +1467,7 @@ def r_index(d):
 
 
 ROUTES = {"/api/servers": r_servers, "/api/server_add": r_server_add, "/api/server_remove": r_server_remove,
+          "/api/server_get": r_server_get, "/api/server_edit": r_server_edit,
           "/api/scan": r_scan, "/api/stats": r_stats,"/api/sudo": r_sudo, "/api/file": r_file, "/api/validate": r_validate,
           "/api/save": r_save, "/api/discard": r_discard, "/api/action": r_action, "/api/remove": r_remove, "/api/bulk": r_bulk, "/api/dres": r_dres, "/api/dres_rm": r_dres_rm, "/api/dres_bulk": r_dres_bulk, "/api/compose": r_compose,
           "/api/logs": r_logs, "/api/inspect": r_inspect, "/api/exec": r_exec,
@@ -2769,7 +2849,8 @@ function serverMenu(name){
   const s=S.fleet.find(x=>x.name===name)||{name},L=S.layout||{groups:[],ungrouped:[]},cur=(L.groups.find(g=>g.servers.includes(name))||{}).name||'';
   const other=S.page==='pm2'?'docker':'pm2',k=(S.known||[]).find(x=>x.name===name),onOther=k&&k.pages.includes(other);
   modal(`<div class="form"><h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('server',18)}</span> ${esc(name)}</h3>
-    <p class="mono small" style="margin-top:-6px">${esc(s.host||'')}</p>
+    <div class="row" style="margin-top:-6px;gap:8px;align-items:center"><p class="mono small grow" style="margin:0">${esc(s.host||'')}</p>
+      ${s.added?`<button class="btn sm" id="medit" title="Change host, user, port, key, jump host or name">${ic('edit',13)} Edit</button>`:`<span class="dim small" title="This server comes from ~/.ssh/config">edit in ~/.ssh/config</span>`}</div>
     <div class="row" style="gap:8px;margin-top:4px"><button class="btn primary" id="mterm" style="flex:1;justify-content:center">${ic('term',15)} Terminal</button>
       <button class="btn" id="mrun" style="flex:1;justify-content:center">${ic('play',13)} Run command</button><button class="btn" id="mdisk" style="flex:1;justify-content:center">${ic('disk',15)} Disk cleanup</button></div>
     <div class="row" style="gap:8px;margin-top:8px"><button class="btn" id="mfiles" style="flex:1;justify-content:center">${ic('folder',15)} Files</button><button class="btn" id="msvc" style="flex:1;justify-content:center">${ic('cpu',15)} Services</button></div>
@@ -2794,9 +2875,41 @@ function serverMenu(name){
     await layoutOp('remove',{server:name}).catch(()=>{});toast(`${esc(name)} removed from ${PGT[S.page]} page`,'ok');if(S.view==='list')goHome()};
   $('#mother').onclick=async()=>{try{await api('/api/layout',{page:other,op:'add',server:name,group:''});closeModal();toast(`${esc(name)} moved to the <b>${PGT[other]}</b> page`,'ok');
     if(S.view==='list'){goHome();return}const j=await api('/api/servers',{page:S.page});applyPage(j);renderHome(true)}catch(e){toast(esc(e.message),'bad')}};
+  $('#medit')&&($('#medit').onclick=()=>{closeModal();editServer(name)});
   $('#mforget')&&($('#mforget').onclick=async()=>{closeModal();
     if(await confirmBox(`Forget <b>${esc(name)}</b>? It is removed from all pages and from dctl. Nothing changes on the server itself.`,'Forget',true)){
       try{await api('/api/server_remove',{name});toast(`${esc(name)} removed`,'ok')}catch(err){toast(esc(err.message),'bad')}loadHome()}});
+}
+async function editServer(name){
+  let a;try{a=await api('/api/server_get',{name})}catch(e){toast(esc(e.message),'bad');return}
+  let auth='key';
+  modal(`<div class="form"><h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('edit',18)}</span> Edit ${esc(name)}</h3>
+    <div class="two"><div><label>Host / IP</label><input id="es_host" value="${esc(a.host)}"></div><div><label>Port</label><input id="es_port" value="${esc(a.port||22)}"></div></div>
+    <div class="two" style="grid-template-columns:1fr 1fr"><div><label>Display name</label><input id="es_name" value="${esc(a.name)}"></div><div><label>SSH user</label><input id="es_user" value="${esc(a.user)}" placeholder="ubuntu"></div></div>
+    <label>Authentication</label>
+    <div class="seg" style="width:100%"><button data-auth="key" class="on" style="flex:1;justify-content:center">${ic('lock',14)} SSH key</button><button data-auth="pw" style="flex:1;justify-content:center">${ic('term',14)} Password</button></div>
+    <div id="es_key_box"><label>Private key file (optional — your default keys are used if empty)</label><input id="es_key" value="${esc(a.key)}" placeholder="~/.ssh/my-server.pem"></div>
+    <div id="es_pw_box" class="hidden"><label>SSH password</label><input id="es_pw" type="password">
+      <div class="note" style="margin-top:10px;font-size:12.5px">Used <b>once</b> to add your SSH public key to the server. The password is never stored.</div></div>
+    <label>Jump host <span class="dim">(optional)</span></label>
+    <input id="es_jump" list="es_jumps" value="${esc(a.jump)}" placeholder="bastion   or   user@bastion.example.com:22" autocomplete="off">
+    <datalist id="es_jumps">${(S.known||[]).filter(k=>k.name!==name).map(k=>`<option value="${esc(k.name)}">${esc(k.host||'')}</option>`).join('')}</datalist>
+    <div class="note" style="margin-top:12px;font-size:12.5px">If you change the connection, dctl tests it before saving. Nothing changes on the server.</div>
+    <div id="es_err" class="err" style="margin-top:10px"></div>
+    <div class="row end" style="margin-top:8px"><button class="btn ghost" id="mno">Cancel</button><button class="btn primary" id="myes">${ic('check',15)} Save</button></div></div>`,true);
+  $$('#mbox [data-auth]').forEach(b=>b.onclick=()=>{auth=b.dataset.auth;$$('#mbox [data-auth]').forEach(x=>x.classList.toggle('on',x===b));
+    $('#es_key_box').classList.toggle('hidden',auth!=='key');$('#es_pw_box').classList.toggle('hidden',auth!=='pw')});
+  $('#mno').onclick=closeModal;$('#es_host').focus();
+  const go=async()=>{
+    const d={old:name,name:$('#es_name').value.trim(),host:$('#es_host').value.trim(),port:$('#es_port').value.trim(),user:$('#es_user').value.trim(),
+             key:auth==='key'?$('#es_key').value.trim():(a.key||''),password:auth==='pw'?$('#es_pw').value:'',jump:$('#es_jump').value.trim()};
+    if(auth==='pw'&&!d.password){$('#es_err').textContent='Enter the SSH password';return}
+    $('#myes').disabled=true;$('#es_err').innerHTML='<span class="spin"></span> <span class="mut">checking…</span>';
+    try{const j=await api('/api/server_edit',d);closeModal();
+      toast(j.renamed?`<b>${esc(name)}</b> renamed to <b>${esc(j.server)}</b>`:`<b>${esc(j.server)}</b> saved`,'ok');
+      if(S.view==='list'&&S.fserver===name){if(j.renamed)goHome();else openServer(name)}else await loadHome();
+    }catch(e){$('#es_err').textContent=e.message;$('#myes').disabled=false}};
+  $('#myes').onclick=go;$$('#mbox input').forEach(i=>i.onkeydown=e=>{if(e.key==='Enter')go()});
 }
 function addServer(group){
   let mode='existing',auth='key';
