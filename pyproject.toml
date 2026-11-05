@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dctl"
 dynamic = ["version"]
-description = "Agentless Docker & PM2 dashboard for many servers - only SSH needed"
+description = "Agentless Docker, PM2 & Kubernetes dashboard for many servers - only SSH needed"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Vishal Singh" }]
 requires-python = ">=3.8"
 dependencies = ["pywebview>=5"]   # native app window; falls back to a browser window if unavailable
-keywords = ["docker", "pm2", "ssh", "devops", "dashboard", "agentless", "docker-compose"]
+keywords = ["docker", "pm2", "ssh", "devops", "dashboard", "agentless", "docker-compose", "kubernetes", "k8s", "helm"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",

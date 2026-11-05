@@ -1526,7 +1526,7 @@ class WS:
             self.sock.sendall(h + data)
 
 
-def terminal(handler, server, container=None):
+def terminal(handler, server, container=None, argv=None):
     req = handler.headers
     key = req.get("Sec-WebSocket-Key", "")
     acc = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
@@ -1537,6 +1537,11 @@ def terminal(handler, server, container=None):
     pid, fd = pty.fork()
     if pid == 0:                                         # child: the ssh session
         os.environ["TERM"] = "xterm-256color"
+        if argv:                                         # e.g. kubectl exec -it … (Kubernetes page)
+            try:
+                os.execvp(argv[0], argv)
+            finally:
+                os._exit(127)
         cmd = SSH[:]
         i = cmd.index("BatchMode=yes"); del cmd[i - 1:i + 1]   # allow interactive prompts (passwords, host keys)
         remote = []
@@ -2146,6 +2151,12 @@ class H(BaseHTTPRequestHandler):
             if (qs.get("t", [""])[0] != TOKEN or origin not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}")
                     or self.headers.get("Upgrade", "").lower() != "websocket"):
                 return self._send(403, "forbidden", "text/plain")
+            if qs.get("k8s"):
+                try:
+                    argv = K8S.exec_argv(qs["k8s"][0], qs.get("ns", [""])[0], qs.get("pod", [""])[0], qs.get("c", [""])[0])
+                except Exception as e:
+                    return self._send(400, str(e), "text/plain")
+                return terminal(self, None, argv=argv)
             server = qs.get("server", [""])[0]
             if server not in servers():
                 return self._send(404, "unknown server", "text/plain")
@@ -2571,11 +2582,12 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 
 @media (max-width:1000px){.crow{grid-template-columns:100px 1fr 120px}.crow .c-ports,.crow .c-up{display:none}.dgauges{grid-template-columns:repeat(2,1fr)}.kbtn{min-width:0}.kbtn span{display:none}}
 @media (max-width:640px){.crow{grid-template-columns:1fr}.crow .bars{display:none}.top{padding:10px 14px}#crumb{display:none}}
+/*K8S_CSS*/
 </style></head><body>
 <div class="bg"><i></i><i></i><i></i></div>
 <header class="top">
   <div class="brand" id="logo"><img src="/icon.png" alt="" class="logo-img"><span>dctl</span></div>
-  <nav class="ptabs" id="ptabs"><a data-pg="docker"><span class="mi" data-i="box"></span>Docker</a><a data-pg="pm2"><span class="mi" data-i="bolt"></span>PM2</a></nav>
+  <nav class="ptabs" id="ptabs"><a data-pg="docker"><span class="mi" data-i="box"></span>Docker</a><a data-pg="pm2"><span class="mi" data-i="bolt"></span>PM2</a><a data-pg="k8s"><span class="mi" data-i="k8s"></span>Kubernetes</a></nav>
   <nav id="crumb"></nav>
   <span class="grow"></span>
   <button class="btn ghost" id="toprun" title="Run a command on one or many servers"></button>
@@ -2611,6 +2623,8 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
   <div class="lwrap"><div id="rows"></div></div>
 </section>
 
+<section id="k8v" class="view hidden"></section>
+<div id="k8bulk" class="hidden"></div><aside id="k8d" class="hidden"></aside>
 <div id="scrim" class="hidden"></div>
 <aside id="detail" class="hidden"></aside>
 <div id="bulkbar" class="hidden"></div>
@@ -2632,7 +2646,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 <script>
 const TOKEN="__TOKEN__",NOPTY=__NOPTY__;
 const S={picked:new Set(),rpicked:new Set(),dtab:'containers',res:{},view:'home',fleet:[],containers:[],stats:{},sel:null,tab:'overview',file:null,orig:'',sha:'',tmp:null,cm:null,ta:null,
-  logTimer:null,liveTimer:null,mode:'docker',pm2:{},page:(()=>{try{return localStorage.getItem('dctl.page')==='pm2'?'pm2':'docker'}catch(_){return'docker'}})(),layout:null,layoutPage:null,known:[],gcol:{},fserver:'',filter:'all',collapsed:{},lastCheck:null,palI:0,palItems:[]};
+  logTimer:null,liveTimer:null,mode:'docker',pm2:{},page:(()=>{try{const p=localStorage.getItem('dctl.page');return p==='pm2'||p==='k8s'?p:'docker'}catch(_){return'docker'}})(),layout:null,layoutPage:null,known:[],gcol:{},fserver:'',filter:'all',collapsed:{},lastCheck:null,palI:0,palItems:[]};
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const OFF=['unreachable','no_access','error'];
@@ -2657,7 +2671,9 @@ const P={
  copy:'<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',chev:'<path d="M9 18l6-6-6-6"/>',more:'<circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/>',
  disk:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
- shield:'<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/>',upload:'<path d="M12 16V4M6 9l6-6 6 6M4 21h16"/>',
+ shield:'<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/>',
+ k8s:'<path d="M12 2.5l8.5 4.1 2.1 9.2-5.9 7.4H7.3l-5.9-7.4 2.1-9.2z"/><circle cx="12" cy="12.5" r="2.6"/><path d="M12 6.5v3.4M12 15.1v3.4M6.6 10.2l3 1.2M14.4 13.6l3 1.2M17.4 10.2l-3 1.2M9.6 13.6l-3 1.2"/>',
+ layers:'<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',upload:'<path d="M12 16V4M6 9l6-6 6 6M4 21h16"/>',
 };
 const ic=(n,s=16)=>`<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n]||''}</svg>`;
 $('#kbtnic').innerHTML=ic('search',15);$('#sic').innerHTML=ic('search',15);$('#palic').innerHTML=ic('search',18);
@@ -2695,8 +2711,8 @@ function dlg2(h){$('#mbox2').className='box wide';$('#mbox2').innerHTML=h;$('#mo
 function closeDlg2(){$('#modal2').classList.add('hidden');$('#mbox2').innerHTML=''}
 function protectConfirm(server,what){return new Promise(res=>{
   dlg2(`<h3>${ic('shield',20)} ${esc(server)} is protected</h3>
-   <p>You are about to <b>${esc(what||'make a change')}</b> on a protected server.</p>
-   <div class="form"><label>Type the server name <code>${esc(server)}</code> to continue</label><input id="d2in" autocomplete="off" spellcheck="false"></div>
+   <p>You are about to <b>${esc(what||'make a change')}</b> on <b>${esc(server)}</b>, which is protected.</p>
+   <div class="form"><label>Type the name <code>${esc(server)}</code> to continue</label><input id="d2in" autocomplete="off" spellcheck="false"></div>
    <div class="row end" style="margin-top:6px"><button class="btn ghost" id="d2no">Cancel</button><button class="btn danger" id="d2yes" disabled>${ic('shield',14)} Continue</button></div>`);
   $('#d2in').oninput=()=>{$('#d2yes').disabled=$('#d2in').value.trim()!==server};
   $('#d2in').onkeydown=e=>{if(e.key==='Enter'&&!$('#d2yes').disabled)$('#d2yes').click()};
@@ -2730,27 +2746,29 @@ function counts(s){const m=s.m||{};if(m.all!=null)return{run:m.run,all:m.all};
   const cs=S.containers.filter(c=>c.server===s.name);return cs.length?{run:cs.filter(c=>c.running).length,all:cs.length}:null}
 
 // ---------- views / nav ----------
-function setView(v){S.view=v;$('#home').classList.toggle('hidden',v!=='home');$('#listv').classList.toggle('hidden',v!=='list');
+function setView(v){const was=S.view;S.view=v;$('#home').classList.toggle('hidden',v!=='home');$('#listv').classList.toggle('hidden',v!=='list');
+  $('#k8v').classList.toggle('hidden',v!=='k8s');if(was==='k8s'&&v!=='k8s'&&window.k8Leave)k8Leave();
   if(v!=='list')stopLive();renderCrumb();renderBulk()}
 function renderCrumb(){$('#crumb').innerHTML=S.view==='list'?`<span class="dim">/</span><a id="cr-home">${PGT[S.page]} servers</a><span class="dim">/</span><b>${esc(S.fserver||'All servers')}</b>`:'';
   $('#cr-home')&&($('#cr-home').onclick=goHome)}
-async function goHome(){if(!await closeDetail())return;loadHome()}
+async function goHome(){if(!await closeDetail())return;if(S.view==='k8s'&&window.k8CloseD&&!await k8CloseD())return;loadHome()}
 $('#logo').onclick=goHome;$('#backhome').onclick=goHome;
 
 // ---------- home ----------
 async function loadHome(){
+  if(S.page==='k8s')return k8Home();
   setView('home');renderPTabs();const pg=S.page;
   if(!S.layout||S.layoutPage!==pg)$('#home').innerHTML=`<div class="hero" style="margin-bottom:22px"><div><h1 style="font-size:24px;margin:0">${PGT[pg]} servers</h1><p class="mut small" style="margin-top:4px"><span class="spin"></span> checking servers…</p></div></div>
     <div class="grid">${'<div class="sk" style="height:230px"></div>'.repeat(3)}</div>`;
   try{const j=await api('/api/servers',{page:pg});if(S.page!==pg)return;applyPage(j);S.lastCheck=new Date()}catch(e){toast(esc(e.message),'bad');return}
   renderHome();bgScan();
 }
-const PGT={docker:'Docker',pm2:'PM2'};
+const PGT={docker:'Docker',pm2:'PM2',k8s:'Kubernetes'};
 function applyPage(j){S.layout=j.layout;S.layoutPage=S.page;S.known=j.known||[];S.fleet=j.servers}
 function mergeFleet(list){const by=Object.fromEntries((list||[]).map(x=>[x.name,x]));S.fleet=S.fleet.map(x=>by[x.name]||x)}
 function renderPTabs(){$$('#ptabs a').forEach(a=>a.classList.toggle('on',a.dataset.pg===S.page))}
 $('#ptabs').onclick=async e=>{const a=e.target.closest('[data-pg]');if(!a)return;
-  if(a.dataset.pg===S.page&&S.view==='home')return;if(!await closeDetail())return;
+  if(a.dataset.pg===S.page&&(S.view==='home'||S.view==='k8s'&&!K.cid))return;if(!await closeDetail())return;if(S.view==='k8s'&&!await k8CloseD())return;
   S.page=a.dataset.pg;try{localStorage.setItem('dctl.page',S.page)}catch(_){}S.fleet=[];S.layout=null;loadHome()};
 let scanning=false;
 async function bgScan(){const pg=S.page,names=S.fleet.filter(s=>s.state!=='unreachable').map(s=>s.name);if(!names.length)return;
@@ -3482,14 +3500,16 @@ async function openTerm(server,opts){opts=opts||{};
     theme:{background:'#05060a',foreground:'#d7dbea',cursor:'#9d8bff',selectionBackground:'rgba(124,92,255,.35)',black:'#1b1e2b',brightBlack:'#5c6378',
       red:'#ff5c7a',green:'#22e3a1',yellow:'#ffc94d',blue:'#7aa2ff',magenta:'#c49bff',cyan:'#22d3ee',white:'#d7dbea'}});
   const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(el);
-  const tab={id,server,container:opts.container||'',el,term,fit,ws:null,state:'connecting'};T.tabs.push(tab);
+  const tab={id,server,container:opts.container||'',k8s:opts.k8s||null,el,term,fit,ws:null,state:'connecting'};T.tabs.push(tab);
   showTermPanel();activateTerm(id);connectTerm(tab);
   term.onData(d=>{if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x00'+d)});
   term.onResize(({cols,rows})=>{if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x01'+JSON.stringify({c:cols,r:rows}))});
 }
 function connectTerm(tab){
   tab.term.write(`\x1b[2mConnecting to ${tab.server}${tab.container?' › container '+tab.container:''}…\x1b[0m\r\n`);tab.state='connecting';renderTermTabs();
-  const ws=new WebSocket(`ws://${location.host}/ws/term?server=${encodeURIComponent(tab.server)}${tab.container?'&container='+encodeURIComponent(tab.container):''}&t=${encodeURIComponent(TOKEN)}`);
+  const k=tab.k8s,qs=k?`k8s=${encodeURIComponent(k.cid)}&ns=${encodeURIComponent(k.ns)}&pod=${encodeURIComponent(k.pod)}&c=${encodeURIComponent(k.c||'')}`
+    :`server=${encodeURIComponent(tab.server)}${tab.container?'&container='+encodeURIComponent(tab.container):''}`;
+  const ws=new WebSocket(`ws://${location.host}/ws/term?${qs}&t=${encodeURIComponent(TOKEN)}`);
   ws.binaryType='arraybuffer';tab.ws=ws;
   ws.onopen=()=>{tab.state='open';renderTermTabs();try{tab.fit.fit()}catch(_){}ws.send('\x01'+JSON.stringify({c:tab.term.cols,r:tab.term.rows}));if(T.cur===tab.id)tab.term.focus()};
   ws.onmessage=e=>tab.term.write(new Uint8Array(e.data));
@@ -3501,7 +3521,7 @@ function activateTerm(id){T.cur=id;T.tabs.forEach(t=>t.el.classList.toggle('on',
 function renderTermTabs(){
   $('#ttabs').innerHTML=T.tabs.map(t=>`<a class="ttab ${t.id===T.cur?'on':''}" data-tid="${t.id}"><i class="tdot ${t.state}"></i>${esc(t.server)}${t.container?` <span class="dim">›</span> ${esc(t.container)}`:''}<span class="tx" data-tclose="${t.id}" title="Close session">${ic('x',12)}</span></a>`).join('');
   const n=T.tabs.length;$('#termbtn').classList.toggle('hidden',!n);$('#termbtn span').textContent=n>1?`Terminal · ${n}`:'Terminal';
-  const t=curTab();$('#trecon').classList.toggle('hidden',!t||t.state!=='closed')}
+  const t=curTab();$('#trecon').classList.toggle('hidden',!t||t.state!=='closed');$('#tfiles').classList.toggle('hidden',!!(t&&t.k8s));$('#tsudo').classList.toggle('hidden',!!(t&&t.k8s))}
 function showTermPanel(){$('#termp').classList.remove('hidden');const t=curTab();if(t)requestAnimationFrame(()=>{try{t.fit.fit()}catch(_){}t.term.focus()})}
 function hideTermPanel(){$('#termp').classList.add('hidden')}
 function closeTerm(id){const t=T.tabs.find(x=>x.id===id);if(!t)return;const ws=t.ws;t.ws=null;try{ws&&ws.close()}catch(_){}t.term.dispose();t.el.remove();
@@ -3511,7 +3531,7 @@ $('#ttabs').onclick=async e=>{const c=e.target.closest('[data-tclose]');if(c){e.
     if(t&&t.state==='open'&&!await confirmBox(`Close the terminal session on <b>${esc(t.server)}</b>? Anything running in it is stopped.`,'Close session',true))return;return closeTerm(+c.dataset.tclose)}
   const a=e.target.closest('[data-tid]');if(a)activateTerm(+a.dataset.tid)};
 $('#tmin').onclick=hideTermPanel;$('#tfiles').onclick=()=>{const t=curTab();if(t){hideTermPanel();openFiles(t.server)}};$('#termbtn').onclick=showTermPanel;
-$('#tnew').onclick=()=>{const t=curTab();if(t)openTerm(t.server,{container:t.container})};
+$('#tnew').onclick=()=>{const t=curTab();if(t)openTerm(t.server,{container:t.container,k8s:t.k8s})};
 $('#trecon').onclick=()=>{const t=curTab();if(t){t.term.reset();connectTerm(t)}};
 $('#tsudo').onclick=()=>{const t=curTab();if(t&&t.ws&&t.ws.readyState===1){t.ws.send('\x00sudo -i\r');t.term.focus()}};
 $('#tfull').onclick=()=>{$('#termp').classList.toggle('full');const t=curTab();if(t)setTimeout(()=>{try{t.fit.fit()}catch(_){}},60)};
@@ -4072,8 +4092,15 @@ document.addEventListener('keydown',e=>{
 });
 window.addEventListener('resize',moveInk);
 window.addEventListener('beforeunload',e=>{if(dirty()||edDirty()){e.preventDefault();e.returnValue=''}});
+//K8S_JS
 loadHome();
 </script></body></html>"""
+
+import sys as _sys
+from dctl import k8s as K8S, k8s_web as _k8w          # Kubernetes page (Lens-like)
+K8S.init(_sys.modules[__name__])
+ROUTES.update(K8S.ROUTES)
+HTML = HTML.replace("/*K8S_CSS*/", _k8w.K8S_CSS).replace("//K8S_JS", _k8w.K8S_JS)
 
 
 def _icon_path():
