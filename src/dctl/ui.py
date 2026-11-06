@@ -2108,6 +2108,267 @@ def r_svc_action(d):
 ROUTES.update({"/api/cls": r_cls, "/api/svc": r_svc, "/api/svc_action": r_svc_action})
 
 
+# ---- MySQL / MariaDB: list databases, export to a .sql.gz on the server, import a .sql / .sql.gz ----
+# Database passwords stay in memory only and reach mysql through stdin + MYSQL_PWD, never on a command line.
+DB_CREDS = {}     # (server, inst) -> {"user", "pw", "host", "port", "sudo"}
+DB_JOBS = {}      # export job id -> (server, partial file path) for progress
+DB_DIR = "dctl-db-backups"            # in the ssh user's home on the server
+DB_IMG_RE = re.compile(r"(mysql|mariadb|percona)(-server)?(:|@|$)")
+DB_CNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+DB_NAME_RE = re.compile(r"[^`\x00-\x1f/\\-][^`\x00-\x1f/\\]{0,63}")
+DB_SYSTEM = {"mysql", "information_schema", "performance_schema", "sys"}
+# inside the container, with no login saved: use the root password the image was started with
+DB_AUTO = ('if [ -z "$U" ]; then U=root; P="${MYSQL_ROOT_PASSWORD:-$MARIADB_ROOT_PASSWORD}"; '
+           'for f in "$MYSQL_ROOT_PASSWORD_FILE" "$MARIADB_ROOT_PASSWORD_FILE"; do '
+           'if [ -z "$P" ] && [ -n "$f" ] && [ -r "$f" ]; then P=$(cat "$f"); fi; done; '
+           'if [ -z "$P" ] && [ -z "$MYSQL_ALLOW_EMPTY_PASSWORD$MARIADB_ALLOW_EMPTY_ROOT_PASSWORD" ] && [ -n "$MYSQL_USER$MARIADB_USER" ]; then '
+           'U="${MYSQL_USER:-$MARIADB_USER}"; P="${MYSQL_PASSWORD:-$MARIADB_PASSWORD}"; fi; fi; ')
+DB_CLIENT = ('if [ -n "$P" ]; then MYSQL_PWD="$P"; export MYSQL_PWD; fi; unset P; '
+             'M=$(command -v mysql || command -v mariadb); MD=$(command -v mysqldump || command -v mariadb-dump); '
+             'if [ -z "$M" ]; then echo "no mysql client (mysql or mariadb) found" >&2; exit 69; fi; '
+             'set -- ${U:+"-u$U"} ${H:+"-h$H"} ${PT:+"-P$PT"}; ')
+DB_LIST_OP = ('$X "$M" "$@" -N -B -e "SELECT \'@@V\', VERSION(), CURRENT_USER(); '
+              'SELECT s.schema_name, COALESCE(SUM(t.data_length + t.index_length), 0), COUNT(t.table_name) '
+              'FROM information_schema.schemata s LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name '
+              'GROUP BY s.schema_name ORDER BY s.schema_name"')
+
+
+def _db_inst(d):
+    s, inst = d.get("server"), str(d.get("inst") or "")
+    if s not in servers():
+        raise RemoteError("unknown server")
+    if inst != "host" and not (inst.startswith("c:") and DB_CNAME_RE.fullmatch(inst[2:])):
+        raise RemoteError("unknown database")
+    return s, inst
+
+
+def _db_name(n, what="database"):
+    n = str(n or "")
+    if not DB_NAME_RE.fullmatch(n) or n != n.strip():
+        raise RemoteError(f"bad {what} name: {n[:70]!r}")
+    return n
+
+
+def _db_run(s, inst, op, feed="", outer="", timeout=120):
+    """Run `op` where mysql lives (in the container, or on the server) with the login set up.
+    The password goes as the first stdin line, then whatever `feed` prints (the .sql to import)."""
+    c = DB_CREDS.get((s, inst))
+    inner = (f"IFS= read -r P; U={q((c or {}).get('user', ''))}; H={q((c or {}).get('host', ''))}; "
+             f"PT={q((c or {}).get('port', ''))}; " + ("" if c or inst == "host" else DB_AUTO) + DB_CLIENT + op)
+    src = '{ printf "%s\\n" "$DBPW"; ' + (feed + "; " if feed else "") + "}"
+    if inst == "host":
+        run = ('X="$S" ' if c and c.get("sudo") else "X= ") + "sh -c " + q(inner)
+        lazy = not (c and c.get("sudo"))
+    else:
+        run = f"$DK exec -i {q(inst[2:])} env X= sh -c {q(inner)}"
+        lazy = not need_docker_root(s)
+    script = f'IFS= read -r DBPW; B="$HOME"/{DB_DIR}; ' + (outer or "@@PIPE").replace("@@PIPE", f"{src} | {run}")
+    return srun(s, script, timeout=timeout, lazy=lazy, data=(((c or {}).get("pw") or "") + "\n").encode())
+
+
+def _db_err(err, out=b""):
+    t = (err.decode("utf-8", "replace") if isinstance(err, bytes) else err).strip()
+    lines = [l for l in t.splitlines() if l.strip() and "Using a password on the command line" not in l
+             and "Deprecated program name" not in l and not l.startswith("@@")]
+    return "\n".join(lines[-12:])
+
+
+def _db_list(s, inst):
+    rc, out, err = _db_run(s, inst, DB_LIST_OP, timeout=60)
+    res = {"inst": inst, "ok": False, "dbs": [], "version": "", "user": ""}
+    if rc != 0:
+        e = _db_err(err)
+        res["error"] = e or f"mysql exited with {rc}"
+        res["need_login"] = rc != 69 and ("ERROR 1045" in e or "ERROR 1698" in e or "Access denied" in e
+                                         or "ERROR 2002" in e or "ERROR 2003" in e or "ERROR 1044" in e)
+        return res
+    for line in out.decode("utf-8", "replace").splitlines():
+        f = line.split("\t")
+        if f[0] == "@@V" and len(f) >= 3:
+            res["version"], res["user"] = f[1], f[2]
+        elif len(f) == 3:
+            try:
+                res["dbs"].append({"name": f[0], "size": int(f[1]), "tables": int(f[2]), "system": f[0].lower() in DB_SYSTEM})
+            except ValueError:
+                pass
+    res["ok"] = True
+    return res
+
+
+def r_db_list(d):
+    s = d.get("server")
+    if s not in servers():
+        raise RemoteError("unknown server")
+    rc, out, err = srun(s, 'C=$(command -v mysql || command -v mariadb); echo "@@CLI $C"; '
+                           'if [ -S /var/run/mysqld/mysqld.sock ] || [ -S /run/mysqld/mysqld.sock ] || [ -S /var/lib/mysql/mysql.sock ] '
+                           '|| systemctl is-active --quiet mysql mysqld mariadb 2>/dev/null; then echo @@SRV; fi; '
+                           f'echo "@@DIR $HOME/{DB_DIR}"; '
+                           'command -v docker >/dev/null 2>&1 && $DK ps --format "{{.Names}}\t{{.Image}}" 2>/dev/null',
+                        timeout=40, lazy=not need_docker_root(s) if INFO.get(s, {}).get("hasdocker", True) else True)
+    txt = out.decode("utf-8", "replace")
+    cli, srv, bdir, found = "", False, "", []
+    for line in txt.splitlines():
+        if line.startswith("@@CLI"):
+            cli = line[6:].strip()
+        elif line == "@@SRV":
+            srv = True
+        elif line.startswith("@@DIR "):
+            bdir = line[6:]
+        elif "\t" in line:
+            name, img = line.split("\t", 1)
+            if DB_IMG_RE.match(img.rsplit("/", 1)[-1]) and DB_CNAME_RE.fullmatch(name):
+                found.append({"inst": "c:" + name, "label": name, "image": img, "kind": "container"})
+    if cli and (srv or (s, "host") in DB_CREDS):
+        found.append({"inst": "host", "label": "MySQL on this server", "image": cli, "kind": "host"})
+    with ThreadPoolExecutor(4) as ex:
+        lists = list(ex.map(lambda i: _db_list(s, i["inst"]), found))
+    for i, l in zip(found, lists):
+        i.update(l)
+        c = DB_CREDS.get((s, i["inst"]))
+        i["login"] = ({"user": c.get("user", ""), "host": c.get("host", ""), "port": c.get("port", ""), "sudo": bool(c.get("sudo"))}
+                      if c else None)
+    return {"instances": found, "hostcli": bool(cli), "dir": bdir}
+
+
+def r_db_login(d):
+    s, inst = _db_inst(d)
+    if d.get("forget"):
+        DB_CREDS.pop((s, inst), None)
+        return {}
+    c = {k: str(d.get(k) or "").strip() for k in ("user", "host", "port")}
+    c["pw"], c["sudo"] = str(d.get("pw") or ""), bool(d.get("sudo")) and inst == "host"
+    if any("\n" in v or "\0" in v for v in c.values() if isinstance(v, str)):
+        raise RemoteError("line breaks are not allowed in the login")
+    if c["port"] and not c["port"].isdigit():
+        raise RemoteError("the port must be a number")
+    if c["host"] and not re.fullmatch(r"[A-Za-z0-9._:-]{1,253}", c["host"]):
+        raise RemoteError("bad database host")
+    old = DB_CREDS.get((s, inst))
+    DB_CREDS[(s, inst)] = c
+    r = _db_list(s, inst)
+    if not r["ok"]:
+        if old:
+            DB_CREDS[(s, inst)] = old
+        else:
+            DB_CREDS.pop((s, inst), None)
+        raise RemoteError(r.get("error") or "login failed")
+    return {}
+
+
+def _db_fname(label, db):
+    safe = lambda x: re.sub(r"[^A-Za-z0-9_.-]+", "_", x).strip("._") or "db"
+    return f"{safe(db) if db else 'all-databases'}-{safe(label)}-{time.strftime('%Y%m%d-%H%M%S')}.sql.gz"
+
+
+def _db_dump(s, inst, db, label, job=None):
+    name = _db_fname(label, db)
+    # "all" = every database except the system ones (mysql holds users/passwords: restoring it elsewhere would replace them)
+    what = q(db) if db else ('--events --databases $($X "$M" "$@" -N -B -e "SELECT schema_name FROM information_schema.schemata '
+                             'WHERE schema_name NOT IN (\'mysql\',\'information_schema\',\'performance_schema\',\'sys\')")')
+    # --no-tablespaces: MySQL 8 needs the PROCESS privilege otherwise; GTID lines would break importing elsewhere
+    op = ('G=; "$MD" --help 2>/dev/null | grep -q -- --set-gtid-purged && G=--set-gtid-purged=OFF; '
+          '$X "$MD" "$@" $G --single-transaction --quick --routines --triggers --hex-blob --no-tablespaces '
+          f'--default-character-set=utf8mb4 {what}; echo "@@RC $?" >&2')
+    outer = (f'mkdir -p "$B" && chmod 700 "$B" || exit 75; F="$B"/{q(name)}; T="$B"/.{q(name)}.part; '
+             f'echo "@@PATH $F"; (@@PIPE) 2>"$T.err" | gzip -c > "$T"; '
+             'if grep -q "^@@RC 0$" "$T.err" && [ -s "$T" ]; then mv -f "$T" "$F"; chmod 600 "$F"; echo "@@SIZE $(stat -c %s "$F")"; '
+             'grep -v "^@@RC" "$T.err" >&2; rm -f "$T.err"; else grep -v "^@@RC" "$T.err" >&2; rm -f "$T" "$T.err"; exit 1; fi')
+    if job:
+        DB_JOBS[str(job)[:64]] = (s, name)
+    try:
+        rc, out, err = _db_run(s, inst, op, outer=outer, timeout=6 * 3600)
+    finally:
+        if job:
+            DB_JOBS.pop(str(job)[:64], None)
+    info = dict(l[2:].split(" ", 1) for l in out.decode("utf-8", "replace").splitlines() if l.startswith("@@") and " " in l)
+    if rc == 75:
+        raise RemoteError(f"could not create ~/{DB_DIR} on the server")
+    if rc != 0 or "SIZE" not in info:
+        raise RemoteError("export failed: " + (_db_err(err) or f"exit {rc}"))
+    return {"path": info.get("PATH", ""), "name": name, "size": int(info["SIZE"]), "warn": _db_err(err)}
+
+
+def r_db_export(d):
+    s, inst = _db_inst(d)
+    db = _db_name(d["db"]) if d.get("db") else ""
+    return _db_dump(s, inst, db, inst[2:] if inst != "host" else s, d.get("job"))
+
+
+def r_db_progress(d):
+    j = DB_JOBS.get(str(d.get("job") or "")[:64])
+    if not j:
+        return {"size": None}
+    rc, out, err = srun(j[0], f'stat -c %s "$HOME"/{DB_DIR}/.{q(j[1])}.part 2>/dev/null', timeout=20, lazy=True)
+    t = out.decode().strip()
+    return {"size": int(t) if t.isdigit() else 0}
+
+
+def r_db_files(d):
+    s = d.get("server")
+    if s not in servers():
+        raise RemoteError("unknown server")
+    rc, out, err = srun(s, f'B="$HOME"/{DB_DIR}; if [ "{1 if d.get("mk") else 0}" = 1 ]; then mkdir -p "$B" && chmod 700 "$B"; fi; '
+                           'echo "@@DIR $B"; [ -d "$B" ] && cd "$B" && for f in *.sql *.sql.gz; do [ -f "$f" ] && '
+                           'printf "%s\\t%s\\t%s\\n" "$(stat -c %s "$f")" "$(stat -c %Y "$f")" "$f"; done; true', timeout=30, lazy=True)
+    res = {"dir": "", "files": []}
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("@@DIR "):
+            res["dir"] = line[6:]
+        else:
+            f = line.split("\t", 2)
+            if len(f) == 3 and f[0].isdigit():
+                res["files"].append({"size": int(f[0]), "mtime": int(f[1]), "name": f[2]})
+    res["files"].sort(key=lambda x: -x["mtime"])
+    return res
+
+
+def r_db_rmfile(d):
+    s = d.get("server")
+    if s not in servers():
+        raise RemoteError("unknown server")
+    n = _upname(d.get("name"))
+    if not (n.endswith(".sql") or n.endswith(".sql.gz")):
+        raise RemoteError("only .sql / .sql.gz files can be deleted here")
+    guard(d, s, f"delete the backup file {n}")
+    rc, out, err = srun(s, f'rm -f -- "$HOME"/{DB_DIR}/{q(n)}', timeout=30, lazy=True)
+    if rc != 0:
+        raise RemoteError(err.decode("utf-8", "replace").strip()[-300:] or "delete failed")
+    return {}
+
+
+def r_db_import(d):
+    s, inst = _db_inst(d)
+    db, n = _db_name(d.get("db")), _upname(d.get("file"))
+    if not (n.endswith(".sql") or n.endswith(".sql.gz")):
+        raise RemoteError("choose a .sql or .sql.gz file")
+    F = f'"$HOME"/{DB_DIR}/{q(n)}'
+    unz = "gzip -dc" if n.endswith(".gz") else "cat"
+    if d.get("check"):
+        rc, out, err = srun(s, f'F={F}; [ -f "$F" ] || {{ echo "@@ERR not found"; exit 0; }}; echo "@@SIZE $(stat -c %s "$F")"; '
+                               f'{unz} < "$F" 2>/dev/null | head -c 4000000 | grep -m3 -aiE "^(USE |CREATE DATABASE)" | cut -c1-200', timeout=60, lazy=True)
+        t = out.decode("utf-8", "replace").splitlines()
+        if any(l.startswith("@@ERR") for l in t):
+            raise RemoteError(f"{n} is not in ~/{DB_DIR} on the server")
+        size = next((int(l[7:]) for l in t if l.startswith("@@SIZE ")), 0)
+        return {"size": size, "switches": [l for l in t if not l.startswith("@@")]}
+    guard(d, s, f"import {n} into the database {db}")
+    backup = None
+    if d.get("backup") and not d.get("create"):
+        backup = _db_dump(s, inst, db, (inst[2:] if inst != "host" else s) + "-before-import")
+    pre = (f'$X "$M" "$@" -e {q("CREATE DATABASE IF NOT EXISTS `" + db + "`")} || exit $?; ' if d.get("create") else "")
+    op = pre + f'exec $X "$M" "$@" --default-character-set=utf8mb4 --database={q(db)}'
+    t0 = time.time()
+    rc, out, err = _db_run(s, inst, op, feed=f'{unz} < {F}', timeout=6 * 3600)
+    if rc != 0:
+        raise RemoteError("the import stopped at this error (statements before it were applied, nothing after it):\n" + (_db_err(err) or f"exit {rc}")
+                          + (f"\n\nA backup from before the import is on the server: {backup['path']}" if backup else ""))
+    return {"secs": round(time.time() - t0, 1), "backup": backup, "warn": _db_err(err)}
+
+
+ROUTES.update({"/api/db_list": r_db_list, "/api/db_login": r_db_login, "/api/db_export": r_db_export, "/api/db_progress": r_db_progress,
+               "/api/db_files": r_db_files, "/api/db_rmfile": r_db_rmfile, "/api/db_import": r_db_import})
+
+
 def download(handler, server, path, inline=False):
     """Stream a remote file to the browser (sudo used automatically if the file isn't readable)."""
     if INFO.get(server, {}).get("sudo") is None:
@@ -2508,6 +2769,9 @@ kbd{font:500 10.5px var(--mono);padding:2px 6px;border-radius:5px;border:1px sol
 @media (max-width:800px){.rrow{grid-template-columns:22px 1fr auto}.rrow>*:nth-child(3),.rrow>*:nth-child(4),.rrow>*:nth-child(5){display:none}}
 .rrow.picked{background:rgba(157,139,255,.07)}.ck:disabled{opacity:.3;cursor:not-allowed}
 .svrow{display:grid;grid-template-columns:14px minmax(180px,1.3fr) minmax(120px,2fr) 84px 230px;gap:12px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px;cursor:pointer}
+.dbrow{display:grid;grid-template-columns:minmax(160px,1fr) 80px 150px auto;gap:12px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px}.dbrow:last-child{border-bottom:0}.dbrow:hover{background:rgba(124,92,255,.05)}
+.dbrow>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;gap:6px;align-items:center}.dbacts{display:flex;gap:6px;justify-content:flex-end}
+.dbinst{margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.015)}.dbsec{margin-top:12px}
 .svrow:hover{background:rgba(255,255,255,.03)}.svrow.on{background:rgba(157,139,255,.08)}
 .svrow .d{width:9px;height:9px;border-radius:50%;background:var(--mut)}.svrow .d.active{background:var(--ok)}.svrow .d.failed{background:var(--bad)}.svrow .d.activating,.svrow .d.reloading{background:var(--warn)}
 .svrow b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.svrow .ds{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2680,6 +2944,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
     <button class="btn ghost" id="topfiles" title="Browse files, download or copy them"></button>
     <button class="btn ghost" id="topdisk" title="See what uses disk space and clean it up"></button>
     <button class="btn ghost" id="topsvc" title="systemd services: status, restart, logs"></button>
+    <button class="btn ghost" id="topdb" title="MySQL / MariaDB: export or import databases"></button>
     <button class="btn ghost" id="toprun2" title="Run a command on this server"></button>
     <button class="btn primary" id="topterm" title="Open a shell on this server"></button>
     <button class="btn ghost" id="srvopt" title="Move to group / remove this server from the page"></button>
@@ -2970,7 +3235,7 @@ function serverMenu(name){
       ${s.added?`<button class="btn sm" id="medit" title="Change host, user, port, key, jump host or name">${ic('edit',13)} Edit</button>`:`<span class="dim small" title="This server comes from ~/.ssh/config">edit in ~/.ssh/config</span>`}</div>
     <div class="row" style="gap:8px;margin-top:4px"><button class="btn primary" id="mterm" style="flex:1;justify-content:center">${ic('term',15)} Terminal</button>
       <button class="btn" id="mrun" style="flex:1;justify-content:center">${ic('play',13)} Run command</button><button class="btn" id="mdisk" style="flex:1;justify-content:center">${ic('disk',15)} Disk cleanup</button></div>
-    <div class="row" style="gap:8px;margin-top:8px"><button class="btn" id="mfiles" style="flex:1;justify-content:center">${ic('folder',15)} Files</button><button class="btn" id="msvc" style="flex:1;justify-content:center">${ic('cpu',15)} Services</button></div>
+    <div class="row" style="gap:8px;margin-top:8px"><button class="btn" id="mfiles" style="flex:1;justify-content:center">${ic('folder',15)} Files</button><button class="btn" id="msvc" style="flex:1;justify-content:center">${ic('cpu',15)} Services</button><button class="btn" id="mdb" style="flex:1;justify-content:center">${ic('disk',15)} Databases</button></div>
     <div class="row" style="gap:10px;margin-top:12px;align-items:center"><span class="shield">${ic('shield',18)}</span>
       <div class="grow small">${s.protected?'<b>Protected.</b> Restart, stop, delete, edit, cleanup… ask you to type the server name first.':'<b>Protect this server</b> (e.g. production): every change asks you to type its name first.'}</div>
       <button class="btn sm" id="mprot">${s.protected?'Remove protection':'Protect'}</button></div>
@@ -2982,7 +3247,7 @@ function serverMenu(name){
       <span class="grow"></span><button class="btn danger" id="mrm">${ic('x',14)} Remove from ${PGT[S.page]} page</button></div>
     ${s.added?`<div class="row end" style="margin-top:8px"><button class="btn ghost" id="mforget" style="color:var(--bad)">Forget this server completely</button></div>`:''}
     <div class="row end" style="margin-top:10px"><button class="btn ghost" id="mno">Close</button></div></div>`);
-  wireGroupSelect();$('#mno').onclick=closeModal;$('#mterm').onclick=()=>{closeModal();openTerm(name)};$('#mrun').onclick=()=>{closeModal();openRun([name])};$('#mdisk').onclick=()=>{closeModal();openDisk(name)};$('#mfiles').onclick=()=>{closeModal();openFiles(name)};$('#msvc').onclick=()=>{closeModal();openSvc(name)};
+  wireGroupSelect();$('#mno').onclick=closeModal;$('#mterm').onclick=()=>{closeModal();openTerm(name)};$('#mrun').onclick=()=>{closeModal();openRun([name])};$('#mdisk').onclick=()=>{closeModal();openDisk(name)};$('#mfiles').onclick=()=>{closeModal();openFiles(name)};$('#msvc').onclick=()=>{closeModal();openSvc(name)};$('#mdb').onclick=()=>{closeModal();openDb(name)};
   $('#mprot').onclick=async()=>{const on=!s.protected;try{await api('/api/protect',{server:name,on});s.protected=on;
       for(const x of S.fleet)if(x.name===name)x.protected=on;closeModal();toast(on?`${ic('shield',14)} <b>${esc(name)}</b> is now protected`:`Protection removed from <b>${esc(name)}</b>`,'ok');
       if(S.view==='home')renderHome(true);else renderLHead()}catch(e){toast(esc(e.message),'bad')}};
@@ -3491,6 +3756,143 @@ async function resRm(t,i){const sv=S.fserver;let id,confirm;
   catch(e){toast(esc(e.message),'bad')}
   loadRes(t)}
 
+// ---------- MySQL / MariaDB: export, import ----------
+const DB={};
+function openDb(server){Object.assign(DB,{server,data:null,files:null,sys:false,busy:false});
+  modal(`<h3><span class="bigic" style="width:36px;height:36px;border-radius:11px">${ic('disk',18)}</span> Databases · ${esc(server)}</h3>
+   <p class="small mut" style="margin:2px 0 0">MySQL / MariaDB in Docker containers or installed on the server. Export makes a <code>.sql.gz</code> backup on the server that you can download; import loads a <code>.sql</code> or <code>.sql.gz</code> file.</p>
+   <div id="dbbody" style="margin-top:10px"><div class="mut" style="padding:24px;text-align:center"><span class="spin"></span> looking for databases…</div></div>
+   <div id="dbpane"></div>
+   <div class="dbsec"><div class="row" style="gap:8px"><b>${ic('folder',14)} Backup files on the server</b><span class="dim small mono" id="dbdir" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left"></span><span class="grow"></span>
+     <button class="btn sm" id="dbup" title="Upload a .sql or .sql.gz file from this computer, then import it">${ic('upload',13)} Upload .sql…</button><input type="file" id="dbfile" accept=".sql,.gz" class="hidden">
+     <button class="btn sm" id="dbref" title="Refresh">${ic('restart',13)}</button></div><div id="dbfiles" class="fblist" style="max-height:30vh"></div></div>
+   <div class="row end" style="margin-top:10px"><button class="btn ghost" id="mno">Close</button></div>`,'xl');
+  $('#mno').onclick=async()=>{if(DB.busy&&!await confirm2('An export or import is still running. Close this window anyway? It keeps running on the server.','Close'))return;closeModal()};
+  $('#dbref').onclick=()=>{dbLoad();dbFiles()};
+  $('#dbup').onclick=()=>$('#dbfile').click();
+  $('#dbfile').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)dbImportForm(null,null,{local:f})};
+  $('#dbbody').onclick=dbClick;$('#dbfiles').onclick=dbClick;
+  dbLoad();dbFiles()}
+async function dbLoad(){try{DB.data=await api('/api/db_list',{server:DB.server})}
+  catch(e){if($('#dbbody'))$('#dbbody').innerHTML=`<div class="note bad">${esc(e.message)}</div>`;return}
+  dbRender()}
+async function dbFiles(){try{const j=await api('/api/db_files',{server:DB.server});DB.files=j.files;if($('#dbdir'))$('#dbdir').textContent=j.dir}
+  catch(e){if($('#dbfiles'))$('#dbfiles').innerHTML=`<div class="note bad" style="margin:10px">${esc(e.message)}</div>`;return}
+  const el=$('#dbfiles');if(!el)return;
+  el.innerHTML=DB.files.length?DB.files.map(f=>`<div class="dbrow" data-file="${esc(f.name)}"><span class="mono" title="${esc(f.name)}">${esc(f.name)}</span>
+     <span class="dim small">${fmtB(f.size)}</span><span class="dim small">${new Date(f.mtime*1000).toLocaleString()}</span>
+     <span class="dbacts"><button class="btn sm primary" data-da="dl">${ic('download',13)} Download</button><button class="btn sm" data-da="imp">${ic('upload',13)} Import…</button><button class="btn sm" data-da="rm" title="Delete this file from the server">${ic('x',13)}</button></span></div>`).join('')
+   :'<div class="mut small" style="padding:14px">No backups yet. Exports are saved here.</div>'}
+const dbInst=id=>(DB.data&&DB.data.instances.find(i=>i.inst===id));
+function dbRender(){const el=$('#dbbody');if(!el||!DB.data)return;const d=DB.data;
+  if(!d.instances.length){el.innerHTML=`<div class="note warn">No MySQL or MariaDB found on ${esc(DB.server)}: no running container from a mysql / mariadb / percona image, and no MySQL server installed on the host.
+     ${d.hostcli?`<div class="row" style="margin-top:8px"><button class="btn sm" data-da="login" data-inst="host">${ic('lock',13)} Connect to a MySQL server…</button><span class="dim small">e.g. a managed database (RDS) reachable from this server</span></div>`:''}</div>`;return}
+  el.innerHTML=d.instances.map(i=>{const dbs=i.dbs.filter(x=>DB.sys||!x.system),hid=i.dbs.length-dbs.length;
+    return `<div class="dbinst" data-inst="${esc(i.inst)}"><div class="row" style="gap:8px;flex-wrap:wrap">
+      <b>${esc(i.label)}</b><span class="tag mut">${i.kind==='host'?'on the server':'container'}</span>
+      <span class="dim small mono" title="${esc(i.image)}">${esc(i.version?(/mariadb/i.test(i.version)?'MariaDB ':'MySQL ')+i.version.replace(/-.*$/,''):i.image)}${i.user?' · '+esc(i.user):''}</span>
+      <span class="grow"></span>
+      ${i.ok?`<button class="btn sm" data-da="expall" title="All databases in one file">${ic('download',13)} Export all</button><button class="btn sm" data-da="imp">${ic('upload',13)} Import…</button>`:''}
+      <button class="btn sm ghost" data-da="login" title="Use a different MySQL user">${ic('lock',13)} ${i.login?'Login: '+esc(i.login.sudo&&!i.login.user?'sudo':i.login.user||'default'):'Log in…'}</button></div>
+     ${i.ok?`<div class="fblist" style="margin-top:8px;max-height:34vh">${dbs.map(x=>`<div class="dbrow" data-db="${esc(x.name)}"><span class="mono" title="${esc(x.name)}">${ic('disk',13)} ${esc(x.name)}${x.system?' <span class="tag mut">system</span>':''}</span>
+        <span class="dim small">${fmtB(x.size)}</span><span class="dim small">${x.tables} table${x.tables===1?'':'s'}</span>
+        <span class="dbacts"><button class="btn sm primary" data-da="exp">${ic('download',13)} Export</button><button class="btn sm" data-da="imp">${ic('upload',13)} Import…</button></span></div>`).join('')
+        ||'<div class="mut small" style="padding:12px">No databases yet. Use Import… to create one from a file.</div>'}</div>
+        ${hid||DB.sys?`<label class="small dim" style="display:flex;gap:6px;align-items:center;margin-top:6px;cursor:pointer"><input type="checkbox" data-da="sys" ${DB.sys?'checked':''}> show system databases (${i.dbs.filter(x=>x.system).length})</label>`:''}`
+      :`<div class="note ${i.need_login?'warn':'bad'}" style="margin-top:8px">${i.need_login?'Could not log in automatically. ':''}<span class="mono small" style="white-space:pre-wrap">${esc(i.error)}</span>
+        ${i.need_login?`<div style="margin-top:8px"><button class="btn sm primary" data-da="login">${ic('lock',13)} Log in…</button></div>`:''}</div>`}</div>`}).join('')
+   +(d.hostcli&&!d.instances.some(i=>i.inst==='host')?`<div class="row" style="margin-top:8px"><button class="btn sm ghost" data-da="login" data-inst="host">${ic('lock',13)} Connect to another MySQL server…</button></div>`:'')}
+function dbClick(e){const b=e.target.closest('[data-da]');if(!b)return;const a=b.dataset.da;
+  if(a==='sys'){DB.sys=b.checked;dbRender();return}
+  const box=b.closest('[data-inst]'),inst=b.dataset.inst||(box&&box.dataset.inst),row=b.closest('[data-db]'),fr=b.closest('[data-file]');
+  if(a==='login')return dbLoginForm(inst);
+  if(a==='exp'||a==='expall')return dbExport(inst,a==='exp'?row.dataset.db:'');
+  if(a==='imp')return dbImportForm(fr?null:inst,row?row.dataset.db:null,fr?{file:fr.dataset.file}:{});
+  if(a==='dl'){const x=document.createElement('a');x.href=dlUrl(DB.server,$('#dbdir').textContent+'/'+fr.dataset.file);x.download=fr.dataset.file;document.body.appendChild(x);x.click();x.remove();return}
+  if(a==='rm')return dbRm(fr.dataset.file)}
+function dbPane(h){const p=$('#dbpane');if(!p)return null;p.innerHTML=h?`<div class="dbsec note">${h}</div>`:'';if(h)p.scrollIntoView({block:'nearest',behavior:'smooth'});return p}
+function dbLoginForm(inst){const i=dbInst(inst)||{inst:'host',label:'MySQL server',kind:'host'},l=i.login||{},host=inst==='host';
+  dbPane(`<b>${ic('lock',14)} Log in to ${esc(i.label)}</b>
+   <div class="form"><div class="two" style="grid-template-columns:1fr 1fr"><div><label>MySQL user</label><input id="dbu" value="${esc(l.user||(host?'':'root'))}" placeholder="${host?'empty = your ~/.my.cnf':'root'}" autocomplete="off" spellcheck="false"></div>
+     <div><label>Password</label><input id="dbp" type="password" autocomplete="off"></div></div>
+     ${host?`<div class="two"><div><label>Database host <span class="dim">(empty = this server)</span></label><input id="dbh" value="${esc(l.host||'')}" placeholder="e.g. mydb.xxxx.rds.amazonaws.com" spellcheck="false"></div><div><label>Port</label><input id="dbpt" value="${esc(l.port||'')}" placeholder="3306"></div></div>
+     <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="dbsu" ${l.sudo?'checked':''}> Run mysql with sudo <span class="dim">(Ubuntu/Debian: root logs in through the socket, no password)</span></label>`:''}</div>
+   <p class="small dim" style="margin:8px 0 0">${ic('lock',11)} The password stays in dctl's memory only (forgotten when dctl closes) and is passed to mysql without appearing in any command line.</p>
+   <div class="row end" style="gap:8px;margin-top:8px">${i.login?'<button class="btn ghost" id="dbfg">Forget login</button>':''}<button class="btn ghost" id="dbcx">Cancel</button><button class="btn primary" id="dbgo">${ic('check',14)} Log in</button></div>`);
+  $('#dbcx').onclick=()=>dbPane('');
+  if($('#dbfg'))$('#dbfg').onclick=async()=>{await api('/api/db_login',{server:DB.server,inst,forget:true}).catch(()=>{});dbPane('');dbLoad()};
+  $('#dbp').onkeydown=e=>{if(e.key==='Enter')$('#dbgo').click()};setTimeout(()=>($('#dbu').value?$('#dbp'):$('#dbu')).focus(),30);
+  $('#dbgo').onclick=async()=>{const b=$('#dbgo');b.disabled=true;b.innerHTML='<span class="spin"></span> Checking…';
+    try{await api('/api/db_login',{server:DB.server,inst,user:$('#dbu').value,pw:$('#dbp').value,host:host?$('#dbh').value:'',port:host?$('#dbpt').value:'',sudo:host&&$('#dbsu').checked});
+      dbPane('');toast('Logged in','ok');dbLoad()}
+    catch(e){b.disabled=false;b.innerHTML=ic('check',14)+' Log in';toast(esc(e.message).replace(/\n/g,'<br>'),'bad',8000)}}}
+async function dbExport(inst,db){if(DB.busy){toast('Wait for the running export or import to finish','info');return}
+  const i=dbInst(inst),job=Math.random().toString(36).slice(2),what=db?`<code>${esc(db)}</code>`:'all databases';
+  DB.busy=true;dbPane(`<b><span class="spin"></span> Exporting ${what} from ${esc(i.label)}…</b><div class="small dim" id="dbprog" style="margin-top:6px">starting mysqldump</div>`);
+  const t0=Date.now(),tm=setInterval(async()=>{try{const j=await api('/api/db_progress',{job});if(j.size!=null&&$('#dbprog'))$('#dbprog').textContent=`${fmtB(j.size)} written (compressed) · ${Math.round((Date.now()-t0)/1000)}s`}catch(_){}},1500);
+  try{const r=await api('/api/db_export',{server:DB.server,inst,db,job});clearInterval(tm);DB.busy=false;
+    dbPane(`<div class="row" style="gap:8px;flex-wrap:wrap"><b style="color:var(--ok)">${ic('check',14)} Exported ${what}</b><span class="dim small">${fmtB(r.size)} in ${Math.round((Date.now()-t0)/1000)}s</span><span class="grow"></span>
+      <button class="btn sm primary" id="dbdl">${ic('download',13)} Download to this computer</button><button class="btn sm ghost" id="dbok">OK</button></div>
+      <div class="small dim mono" style="margin-top:6px">Saved on the server: ${esc(r.path)}</div>${r.warn?`<pre class="term" style="max-height:20vh;overflow:auto;margin-top:8px">${esc(r.warn)}</pre>`:''}`);
+    $('#dbdl').onclick=()=>{const x=document.createElement('a');x.href=dlUrl(DB.server,r.path);x.download=r.name;document.body.appendChild(x);x.click();x.remove()};
+    $('#dbok').onclick=()=>dbPane('');dbFiles()}
+  catch(e){clearInterval(tm);DB.busy=false;dbPane(`<b style="color:var(--bad)">${ic('alert',14)} Export failed</b><pre class="term" style="max-height:30vh;overflow:auto;margin-top:8px">${esc(e.message)}</pre><div class="row end"><button class="btn sm ghost" id="dbok">OK</button></div>`);$('#dbok').onclick=()=>dbPane('')}}
+function dbImportForm(inst,db,src){const ins=(DB.data?DB.data.instances:[]).filter(i=>i.ok);
+  if(!ins.length){toast('No database you are logged in to on this server','info');return}
+  inst=inst&&dbInst(inst)&&dbInst(inst).ok?inst:ins[0].inst;
+  const files=DB.files||[];
+  dbPane(`<b>${ic('upload',14)} Import a .sql file</b>
+   <div class="form"><div class="two" style="grid-template-columns:1fr 1fr">
+    <div><label>File</label><select id="disrc" style="width:100%">${src.local?`<option value="@local" selected>From this computer: ${esc(src.local.name)} (${fmtB(src.local.size)})</option>`:''}
+      ${files.map(f=>`<option value="${esc(f.name)}" ${src.file===f.name?'selected':''}>${esc(f.name)} · ${fmtB(f.size)}</option>`).join('')}<option value="@pick">Choose a file on this computer…</option></select></div>
+    <div><label>Into</label><select id="diinst" style="width:100%">${ins.map(i=>`<option value="${esc(i.inst)}" ${i.inst===inst?'selected':''}>${esc(i.label)}</option>`).join('')}</select></div></div>
+    <div class="two" style="grid-template-columns:1fr 1fr"><div><label>Database</label><select id="didb" style="width:100%"></select></div>
+     <div id="dinewbox" class="hidden"><label>New database name</label><input id="dinew" placeholder="e.g. shop_staging" spellcheck="false" autocomplete="off"></div></div>
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer" id="dibkl"><input type="checkbox" id="dibk" checked> Back up this database first <span class="dim">(saved with the other backups, so you can go back)</span></label></div>
+   <div id="dichk" class="small" style="margin-top:8px"></div>
+   <div class="row end" style="gap:8px;margin-top:8px"><button class="btn ghost" id="dicx">Cancel</button><button class="btn primary" id="digo">${ic('upload',14)} Import</button></div>`);
+  let local=src.local||null;
+  const fill=()=>{const i=dbInst($('#diinst').value),cur=$('#didb').value||db;
+    $('#didb').innerHTML=i.dbs.filter(x=>!x.system).map(x=>`<option value="${esc(x.name)}" ${x.name===cur?'selected':''}>${esc(x.name)}</option>`).join('')+'<option value="@new">+ New database…</option>';
+    if(!i.dbs.some(x=>!x.system&&x.name===cur))$('#didb').value=i.dbs.some(x=>!x.system)?$('#didb').options[0].value:'@new';side()};
+  const side=()=>{const nw=$('#didb').value==='@new';$('#dinewbox').classList.toggle('hidden',!nw);$('#dibk').disabled=nw;$('#dibkl').style.opacity=nw?.5:1;if(nw)setTimeout(()=>$('#dinew').focus(),20)};
+  $('#diinst').onchange=fill;$('#didb').onchange=side;fill();
+  $('#disrc').onchange=()=>{if($('#disrc').value!=='@pick')return;const inp=document.createElement('input');inp.type='file';inp.accept='.sql,.gz';
+    inp.onchange=()=>{const f=inp.files[0];if(!f){$('#disrc').selectedIndex=0;return}local=f;const o=$('#disrc').querySelector('option[value="@local"]')||document.createElement('option');
+      o.value='@local';o.textContent=`From this computer: ${f.name} (${fmtB(f.size)})`;$('#disrc').prepend(o);$('#disrc').value='@local'};inp.click()};
+  $('#dicx').onclick=()=>dbPane('');
+  $('#digo').onclick=()=>dbImport(local)}
+async function dbImport(local){if(DB.busy){toast('Wait for the running export or import to finish','info');return}
+  const srcv=$('#disrc').value,inst=$('#diinst').value,i=dbInst(inst),nw=$('#didb').value==='@new',db=nw?$('#dinew').value.trim():$('#didb').value,backup=!nw&&$('#dibk').checked;
+  if(srcv==='@pick'||(srcv==='@local'&&!local)){toast('Choose a file first','info');return}
+  if(!db){toast('Type a name for the new database','info');$('#dinew').focus();return}
+  const fname=srcv==='@local'?local.name:srcv;
+  if(!/\.sql(\.gz)?$/i.test(fname)){toast('Only .sql or .sql.gz files can be imported','bad');return}
+  if(nw&&i.dbs.some(x=>x.name===db)){toast(`A database named ${esc(db)} already exists — pick it from the list instead`,'bad');return}
+  const st=h=>{if($('#dichk'))$('#dichk').innerHTML=h},btn=$('#digo');DB.busy=true;btn.disabled=true;
+  try{let name=fname;
+    if(srcv==='@local'){const dir=(await api('/api/db_files',{server:DB.server,mk:1})).dir;
+      let chk=await api('/api/upcheck',{server:DB.server,dir,names:[name]}),over=false;
+      if(chk.exists.length){DB.busy=false;if(!await confirm2(`<code>${esc(name)}</code> is already in <code>${esc(chk.path)}</code>. Replace it with the file from this computer?`,'Replace'))throw new Error('');DB.busy=true;over=true}
+      st(`<div class="upl"><b>${esc(name)}</b><div class="mbar"><i id="dibar" style="width:0%;background:var(--a1)"></i></div><span class="dim mono" id="dipct">uploading</span></div>`);
+      await upOne(chk.ticket,local,over,p=>{if($('#dibar'))$('#dibar').style.width=(p*100).toFixed(1)+'%';if($('#dipct'))$('#dipct').textContent=p>=1?'checking…':Math.round(p*100)+'%'});dbFiles()}
+    st('<span class="spin"></span> checking the file…');
+    const c=await api('/api/db_import',{server:DB.server,inst,db,file:name,check:true});
+    const sw=c.switches.length?`<div class="note warn" style="margin-top:8px"><b>This file picks its own database</b>, so its data may go there instead of <code>${esc(db)}</code>:<pre class="term" style="margin:6px 0 0">${c.switches.map(esc).join('\n')}</pre></div>`:'';
+    st('');DB.busy=false;
+    if(!await confirm2(`Import <code>${esc(name)}</code> (${fmtB(c.size)}) into ${nw?'the new database':'the database'} <b>${esc(db)}</b> on <b>${esc(i.label)}</b>?
+       ${nw?'':`<br><br>Tables in the file <b>replace</b> the tables with the same name in <b>${esc(db)}</b>. ${backup?'A backup is made first.':'<b style="color:var(--warn)">No backup will be made.</b>'}`}${sw}`,'Import'))throw new Error('');
+    DB.busy=true;const t0=Date.now();st(`<span class="spin"></span> ${backup?'backing up '+esc(db)+', then ':''}importing… <span id="ditm"></span>`);
+    const tm=setInterval(()=>{if($('#ditm'))$('#ditm').textContent=Math.round((Date.now()-t0)/1000)+'s'},1000);
+    let r;try{r=await api('/api/db_import',{server:DB.server,inst,db,file:name,create:nw,backup})}finally{clearInterval(tm)}
+    DB.busy=false;dbPane(`<div class="row" style="gap:8px;flex-wrap:wrap"><b style="color:var(--ok)">${ic('check',14)} Imported ${esc(name)} into ${esc(db)}</b><span class="dim small">${r.secs}s</span><span class="grow"></span><button class="btn sm ghost" id="dbok">OK</button></div>
+      ${r.backup?`<div class="small dim mono" style="margin-top:6px">Backup from before: ${esc(r.backup.path)} (${fmtB(r.backup.size)})</div>`:''}${r.warn?`<pre class="term" style="max-height:20vh;overflow:auto;margin-top:8px">${esc(r.warn)}</pre>`:''}`);
+    $('#dbok').onclick=()=>dbPane('');toast(`Imported into <b>${esc(db)}</b>`,'ok');dbLoad();dbFiles()}
+  catch(e){DB.busy=false;if(btn)btn.disabled=false;if(!e.message){st('');return}
+    st(`<div class="note bad"><b>Import failed</b><pre class="term" style="max-height:30vh;overflow:auto;margin:6px 0 0;white-space:pre-wrap">${esc(e.message)}</pre></div>`);dbLoad()}}
+async function dbRm(name){if(!await confirm2(`Delete the backup file <code>${esc(name)}</code> from the server? This can't be undone.`,'Delete'))return;
+  try{await api('/api/db_rmfile',{server:DB.server,name});toast('Deleted '+esc(name),'ok')}catch(e){toast(esc(e.message),'bad')}dbFiles()}
+
 // ---------- systemd services ----------
 const SV={timer:null};
 function openSvc(server){Object.assign(SV,{server,f:'run',q:'',sel:null,mode:'status',items:null});clearInterval(SV.timer);
@@ -3594,6 +3996,7 @@ function pmAllLogs(){const procs=pm2Procs();if(!procs.length){toast('No PM2 proc
   load();follow()}
 $('#pmlogs').innerHTML=ic('logs',15)+' All logs';$('#pmlogs').onclick=()=>pmAllLogs();
 $('#topsvc').innerHTML=ic('cpu',15)+' Services';$('#topsvc').onclick=()=>S.fserver&&openSvc(S.fserver);
+$('#topdb').innerHTML=ic('disk',15)+' Databases';$('#topdb').onclick=()=>S.fserver&&openDb(S.fserver);
 
 // ---------- web terminal ----------
 const T={tabs:[],cur:null,seq:0,lib:null};

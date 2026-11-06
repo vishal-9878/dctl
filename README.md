@@ -43,6 +43,7 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 - **Protected servers**: mark production servers as protected. Then every change there (restart, stop, delete, edit, upload, cleanup, …) asks you to type the server name first.
 - **Disk cleanup**: shows what is using space (Docker images, build cache, container logs, journald, rotated logs, PM2 logs, big folders) and cleans it with one click, showing how much space was freed.
 - **systemd services**: running and failed services, restart / stop / start, status and journal logs.
+- **MySQL / MariaDB**: finds databases in mysql / mariadb / percona containers (logs in with the container's own root password) or installed on the server. Export a database (or all of them) to a `.sql.gz` backup on the server and download it; import a `.sql` / `.sql.gz` from your computer or from a backup, into an existing or a new database, with an automatic backup first. Database passwords stay in memory only.
 - **Run a command on many servers at once**, with saved commands.
 - **Global search** (`Ctrl K`) over servers, containers, PM2 processes and ports.
 - **Pages and groups**: separate Docker and PM2 pages, with your own groups (Production, Staging, …).
