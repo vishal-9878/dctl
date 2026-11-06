@@ -388,8 +388,9 @@ def get_c(d):
 
 
 def compose_prefix(c, files=None, project_dir=False):
-    pd = f"--project-directory {q(c['workdir'])} " if project_dir else ""
-    return (f"cd {q(c['workdir'])} && $C {pd}-p {q(c['project'])} "
+    # cd may fail when the project folder belongs to another user and sudo is only allowed per command
+    # (sudo docker still reads it); --project-directory keeps relative paths and .env right either way
+    return (f"cd {q(c['workdir'])} 2>/dev/null; $C --project-directory {q(c['workdir'])} -p {q(c['project'])} "
             + " ".join("-f " + q(f) for f in (files or c["files"])))
 
 
@@ -400,13 +401,24 @@ def check_file(c, path):
         raise RemoteError("file is not a compose file of this container")
 
 
-def file_run(server, script):
-    """Try as normal user; exit 77 from the script means 'no permission' -> retry with sudo."""
+def file_run(server, script, per_cmd=None):
+    """Try as normal user; exit 77 from the script means 'no permission' -> retry with sudo.
+    Servers whose sudoers forbid shells (!/bin/sh) get `per_cmd` instead: the same steps with $S on each command."""
     rc, out, err = run(server, script)
     elevated = False
     if rc == 77:
-        rc, out, err = run(server, script, elevate=True)
         elevated = True
+        if per_cmd and INFO.get(server, {}).get("noshell"):
+            rc, out, err = srun(server, per_cmd)
+        else:
+            try:
+                rc, out, err = run(server, script, elevate=True)
+            except RemoteError:
+                if not (per_cmd and INFO.get(server, {}).get("noshell")):
+                    raise
+                rc, out, err = srun(server, per_cmd)
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
     return rc, out, err, elevated
 
 
@@ -813,7 +825,8 @@ def r_sudo(d):
 
 def r_file(d):
     c = get_c(d); check_file(c, d["path"])
-    rc, out, err, elev = file_run(c["server"], f'f={q(d["path"])}; [ -r "$f" ] || exit 77; cat "$f"')
+    rc, out, err, elev = file_run(c["server"], f'f={q(d["path"])}; [ -r "$f" ] || exit 77; cat "$f"',
+                                  f'f={q(d["path"])}; $S cat -- "$f"')
     if rc != 0:
         raise RemoteError(err.strip() or "cannot read file")
     return {"content": out.decode("utf-8", "replace"), "sha": hashlib.sha256(out).hexdigest(), "elevated": elev}
@@ -846,7 +859,11 @@ def r_save(d):
               'if [ "$(id -u)" != 0 ] && { [ ! -w "$f" ] || [ ! -r "$f" ] || [ ! -w "$(dirname "$f")" ]; }; then exit 77; fi; '
               f'[ "$(sha256sum "$f" | cut -d" " -f1)" = {q(d["sha"])} ] || exit 75; '
               'b="$f.bak.$(date +%Y%m%d-%H%M%S)"; cp -p "$f" "$b" && cat "$t" > "$f" && rm -f "$t" && echo "$b" && sha256sum "$f" | cut -d" " -f1')
-    rc, out, err, elev = file_run(c["server"], script)
+    per_cmd = (f'f={q(path)}; t={q(tmp)}; '
+               f'[ "$($S sha256sum "$f" | cut -d" " -f1)" = {q(d["sha"])} ] || exit 75; '
+               'b="$f.bak.$(date +%Y%m%d-%H%M%S)"; $S cp -p "$f" "$b" && $S tee "$f" < "$t" > /dev/null && rm -f "$t" '
+               '&& echo "$b" && $S sha256sum "$f" | cut -d" " -f1')
+    rc, out, err, elev = file_run(c["server"], script, per_cmd)
     if rc == 75:
         raise RemoteError("the file was changed on the server by someone else after you opened it. Reload and redo your edit.")
     if rc != 0:
@@ -1798,7 +1815,7 @@ def _compose_target(s, path):
 def r_fcompose(d):
     s, op = d["server"], d.get("op")
     t = _compose_target(s, _clean_path(d.get("path")))
-    pre = (f"cd {q(t['workdir'])} && $C " + (f"-p {q(t['project'])} " if t["project"] else "")
+    pre = (f"cd {q(t['workdir'])} 2>/dev/null; $C --project-directory {q(t['workdir'])} " + (f"-p {q(t['project'])} " if t["project"] else "")
            + " ".join("-f " + q(f) for f in t["files"]))
     shown = pre.replace("$C", "docker compose")
     if op == "info":
