@@ -2,7 +2,7 @@
 
 <h1 align="center">dctl</h1>
 
-<p align="center"><b>Agentless desktop app and CLI for Docker, PM2 and Kubernetes across many servers, using only SSH.</b></p>
+<p align="center"><b>Agentless desktop app and CLI for Docker and PM2 across many servers, using only SSH.</b></p>
 
 dctl runs on *your* machine. The servers need nothing new: no agent, no daemon, no open ports, no package to install. If you can `ssh` into a server and it has Docker or PM2, dctl can manage it.
 
@@ -35,17 +35,6 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 - **Logs**: per process, or **many processes together** with "errors only", search highlight and follow.
 - Choose which users' PM2 to show per server.
 
-### Kubernetes (Lens-like)
-- Clusters from your **local kubeconfig** (every context shows up automatically) and from **servers over SSH** that run `kubectl`, **k3s** or **microk8s**: nothing is installed in the cluster or on the server.
-- **Overview**: nodes, pods, CPU / memory usage vs requests and limits, workload health, recent warning events.
-- **Workloads**: Pods (status, restarts, CPU / memory, node), Deployments, DaemonSets, StatefulSets, ReplicaSets, Jobs, CronJobs.
-- **Config, Network, Storage, Access control**: ConfigMaps, Secrets (values hidden until you press *Show*), Resource Quotas, Limit Ranges, HPA, PDB, Priority Classes, Services, Endpoints, Ingresses, Network Policies, PVC, PV, Storage Classes, Service Accounts, Roles and Bindings, Nodes, Namespaces, Events, and **Custom Resources** (any CRD).
-- Per resource: **describe**, **YAML view and edit** (`kubectl replace`, so a stale edit fails instead of overwriting), events, and actions: delete (also many at once), **scale**, **rollout restart**, CronJob *run now* / suspend / resume, node **cordon / uncordon / drain**.
-- **Pod logs** (per container, previous container, timestamps, follow, filter, download) and a **shell into the pod** in the web terminal.
-- **Port forwarding** for pods, services and deployments, opened on `127.0.0.1` of your computer (also for clusters reached over SSH).
-- **Helm**: releases, values, manifest, notes, history, **roll back** and uninstall.
-- **Create from YAML** with templates, namespace filter, sorting, live refresh, and **protected clusters** (type the name before any change).
-
 ### Servers
 - **Web terminal**: a full SSH shell to any server in the browser, with tabs. Minimised terminals stay open.
 - **Files**: browse any folder; view, copy, download or **edit** a file (with a diff review and backup); **upload** files from your computer (button or drag and drop). It uses sudo automatically, only where you need it.
@@ -71,7 +60,6 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 **On each server**
 - `ssh` access
 - Docker and/or PM2, as they already are
-- For the Kubernetes page over SSH: `kubectl`, k3s or microk8s already working there (local kubeconfig clusters need only `kubectl` on your computer; Helm features need `helm`)
 - `sudo` is optional; it is used only when your user can't do something directly
 
 ---
@@ -237,8 +225,7 @@ Files in `~/.config/dctl/`:
 | `servers` | Optional list of SSH hosts, one per line |
 | `servers.json` | Servers added from the UI (mode `600`) |
 | `layout.json` | Which server is on which page and group, and PM2 user choices |
-| `protected.json` | Servers and clusters marked as protected |
-| `k8s.json` | Clusters added from servers over SSH, hidden kubeconfig contexts |
+| `protected.json` | Servers marked as protected |
 | `commands.json` | Saved commands for "Run on many servers" |
 
 ---
@@ -248,7 +235,6 @@ Files in `~/.config/dctl/`:
 - Every action is a short POSIX `sh` script sent over SSH. SSH connection sharing (`ControlMaster`) keeps it fast.
 - **Docker:** uses `docker` directly if your user is allowed to, otherwise `sudo docker`. If the server's sudoers forbids shells through sudo (`!/bin/sh`), dctl puts `sudo` on each single command instead.
 - **PM2:** finds each PM2 "God Daemon" with `ps`, resolves that daemon's own `node` and `pm2` binaries, and runs `pm2` as the owning user with `sudo -u`. Process environment variables are stripped on the server, so secrets never leave it.
-- **Kubernetes:** runs your own `kubectl` / `helm` with `--context` for kubeconfig clusters. For servers over SSH it finds how kubectl works there (`kubectl`, `k3s kubectl`, `microk8s kubectl`, with `sudo` only if needed) and runs it the same way as Docker commands. Port forwards run `kubectl port-forward` locally, or on the server behind an `ssh -L` tunnel.
 - **Web terminal:** a small WebSocket server in the standard library connects your browser to `ssh -tt` running in a local pseudo-terminal.
 
 ## Security
@@ -257,7 +243,7 @@ Files in `~/.config/dctl/`:
 - **sudo and SSH passwords are kept in memory only** and are never written to disk. They are forgotten when dctl-ui stops.
 - Nothing is installed or left running on your servers.
 - Destructive actions ask for confirmation. Deleting volumes, or many items at once, requires typing a word or the item's name.
-- On **protected** servers and clusters, every change needs the name typed first. The check is done by the dctl backend, not only by the page.
+- On **protected** servers, every change needs the server name typed first. The check is done by the dctl backend, not only by the page.
 - dctl can do anything your SSH user (and its sudo rights) can do. Treat access to your machine running dctl-ui like access to your servers.
 
 To use the UI from another computer, use an SSH tunnel instead of exposing the port:
