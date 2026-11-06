@@ -2348,6 +2348,35 @@ kbd{font:500 10.5px var(--mono);padding:2px 6px;border-radius:5px;border:1px sol
 .ptabs a:hover{color:var(--fg)}.ptabs a.on{background:linear-gradient(135deg,rgba(124,92,255,.35),rgba(34,211,238,.18));color:var(--fg);box-shadow:inset 0 0 0 1px rgba(124,92,255,.45)}
 .ptabs .mi{display:inline-flex}
 .gsec{margin-bottom:26px}
+.thd{display:flex;align-items:center;gap:10px;margin:4px 0 12px;color:var(--mut);font-weight:600;font-size:13.5px}.thd .gcount{font-weight:500}
+.tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.gtile,.stile{position:relative;display:flex;align-items:center;gap:12px;min-width:0;padding:12px 14px;border-radius:12px;background:var(--glass);border:1px solid var(--line);
+  cursor:pointer;transition:transform .15s,border-color .15s,background .15s;animation:rise .35s both;animation-delay:var(--d,0ms)}
+.gtile:hover,.stile:hover{transform:translateY(-2px);border-color:rgba(124,92,255,.55);background:rgba(124,92,255,.07)}
+.tic{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;flex:none;color:var(--c,var(--mut));background:color-mix(in srgb,var(--c,#888) 15%,transparent);border:1px solid color-mix(in srgb,var(--c,#888) 35%,transparent)}
+.gtile .tic{--c:#22d3ee;border-radius:11px}
+.tbody2{flex:1;min-width:0}
+.tname{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px}
+.tsub{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.tsub .ok{color:var(--ok)}.tsub .bad{color:var(--bad)}.tsub .warn{color:var(--warn)}
+.tmeters{display:flex;gap:4px;align-items:stretch;height:30px;flex:none}
+.tmeters i{width:6px;border-radius:3px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+.tmeters i b{position:absolute;left:0;right:0;bottom:0;border-radius:3px}
+.stile .x{width:28px;height:28px;opacity:0;transition:.15s;flex:none}.stile:hover .x{opacity:.85}.stile .x:hover{opacity:1}
+.stile.off{opacity:.68}.stile.off .tic{--c:var(--bad)}
+.ttile-add{border-style:dashed;border-color:rgba(124,92,255,.4);background:transparent;color:#b3a6ff;justify-content:center}
+.gchev{color:var(--dim);flex:none;display:inline-flex}
+.ghead{display:flex;align-items:center;gap:12px;margin:0 0 16px;flex-wrap:wrap}.ghead h2{margin:0;font-size:19px;display:flex;align-items:center;gap:8px}
+.ghead .gacts{display:flex;gap:6px}
+.hfilter{max-width:340px;margin:0 0 18px}
+.lmon{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;padding:4px clamp(16px,3vw,32px) 10px}
+.lmon:empty{display:none}
+.mcard{border-radius:12px;background:var(--glass);border:1px solid var(--line);padding:12px 14px;display:flex;align-items:center;gap:12px;min-width:0}
+.mcard .ring{width:68px;flex:none}.mcard .ring svg{width:58px;height:58px}.mcard .ring b{top:19px}.mcard .ring .val{animation:none}.mcard .ring span{display:none}
+.mcard h5{margin:0;font:600 10.5px var(--sans);letter-spacing:1.1px;color:var(--mut);text-transform:uppercase}
+.mcard .big{font-size:22px;font-weight:800;margin-top:2px}.mcard .sm2{font-size:12px;color:var(--mut);margin-top:2px}
+.mcard .kv2{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12.5px;min-width:0}.mcard .kv2 span{color:var(--mut)}.mcard .kv2 b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mcard .cbar{margin:8px 0 0}
 .gsh{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .gsh b{font-size:15px}.gsh .gacts{display:flex;gap:6px;opacity:.55;transition:.15s}.gsh:hover .gacts{opacity:1}
 .icon-btn.sm{width:28px;height:28px}.icon-btn.x2:hover{color:var(--bad);border-color:var(--bad)}
@@ -2619,6 +2648,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
     <button class="btn primary" id="topterm" title="Open a shell on this server"></button>
     <button class="btn ghost" id="srvopt" title="Move to group / remove this server from the page"></button>
   </div>
+  <div id="lmon" class="lmon"></div>
   <nav class="dtabs hidden" id="dtabs"><a data-dt="containers" class="on">Containers <span id="dt-containers">·</span></a><a data-dt="images">Images <span id="dt-images">·</span></a><a data-dt="volumes">Volumes <span id="dt-volumes">·</span></a><a data-dt="networks">Networks <span id="dt-networks">·</span></a></nav>
   <div class="toolbar">
     <div class="search"><span id="sic"></span><input id="q" placeholder="Filter containers, images, projects…" autocomplete="off"><kbd>/</kbd></div>
@@ -2774,7 +2804,7 @@ function mergeFleet(list){const by=Object.fromEntries((list||[]).map(x=>[x.name,
 function renderPTabs(){$$('#ptabs a').forEach(a=>a.classList.toggle('on',a.dataset.pg===S.page))}
 $('#ptabs').onclick=async e=>{const a=e.target.closest('[data-pg]');if(!a)return;
   if(a.dataset.pg===S.page&&S.view==='home')return;if(!await closeDetail())return;
-  S.page=a.dataset.pg;try{localStorage.setItem('dctl.page',S.page)}catch(_){}S.fleet=[];S.layout=null;loadHome()};
+  S.page=a.dataset.pg;S.hgroup=null;S.hq='';try{localStorage.setItem('dctl.page',S.page)}catch(_){}S.fleet=[];S.layout=null;loadHome()};
 let scanning=false;
 async function bgScan(){const pg=S.page,names=S.fleet.filter(s=>s.state!=='unreachable').map(s=>s.name);if(!names.length)return;
   if(pg==='pm2'){await Promise.all(S.fleet.filter(s=>s.state!=='unreachable'&&s.m&&s.m.pm2).map(async s=>{
@@ -2788,30 +2818,53 @@ function renderHome(quiet){
   if(quiet&&!$('#modal').classList.contains('hidden')){S.homeDirty=true;return}
   const L=S.layout||{ungrouped:[],groups:[]},by=Object.fromEntries(S.fleet.map(s=>[s.name,s]));
   const t=S.lastCheck?S.lastCheck.toLocaleTimeString():'';let i=0;
-  const cards=(names,g)=>`<div class="grid">${names.filter(n=>by[n]).map(n=>card(by[n],++i)).join('')}
-      <div class="scard add mini" data-addg="${esc(g)}" style="--d:${(++i)*55}ms"><div class="addic">${ic('plus',20)}</div><b>Add server${g?` to ${esc(g)}`:''}</b></div></div>`;
-  const online=names=>names.filter(n=>by[n]&&by[n].state!=='unreachable').length;
-  const empty=!L.ungrouped.length&&!L.groups.length;
+  const hadFocus=document.activeElement&&document.activeElement.id==='hq',caret=hadFocus?document.activeElement.selectionStart:0;
+  if(S.hgroup&&!L.groups.some(g=>g.name===S.hgroup))S.hgroup=null;
+  const tiles=(names,g)=>`<div class="tgrid">${names.filter(n=>by[n]).map(n=>stile(by[n],++i)).join('')}
+      ${g!==null?`<div class="stile ttile-add" data-addg="${esc(g)}" style="--d:${(++i)*25}ms">${ic('plus',16)} <b>Add server${g?` to ${esc(g)}`:''}</b></div>`:''}</div>`;
+  const online=names=>names.filter(n=>by[n]&&!OFF.includes(by[n].state)).length;
+  const empty=!L.ungrouped.length&&!L.groups.length,q=(S.hq||'').toLowerCase().trim();
+  let body;
+  if(q){const all=[...L.ungrouped,...L.groups.flatMap(g=>g.servers)].filter(n=>by[n]&&(n.toLowerCase().includes(q)||(by[n].host||'').toLowerCase().includes(q)));
+    body=`<div class="thd">${all.length} server${all.length==1?'':'s'} matching “${esc(S.hq)}”</div>${all.length?tiles(all,null):''}`}
+  else if(S.hgroup){const gi=L.groups.findIndex(g=>g.name===S.hgroup),g=L.groups[gi];
+    body=`<div class="ghead"><button class="icon-btn" data-gback title="Back to all groups">${ic('back',16)}</button>
+      <h2><span class="gico">${ic('folder',16)}</span>${esc(g.name)}</h2><span class="gcount"><span style="color:var(--ok)">●</span> ${online(g.servers)}/${g.servers.length} online</span><span class="grow"></span>
+      <span class="gacts">${gi?`<button class="btn ghost sm" data-gact="up" data-g="${esc(g.name)}" title="Show this group earlier in the list">${ic('up',13)} Move up</button>`:''}
+      <button class="btn ghost sm" data-gact="run" data-g="${esc(g.name)}" title="Run a command on all servers of this group">${ic('play',12)} Run on all</button>
+      <button class="btn ghost sm" data-gact="ren" data-g="${esc(g.name)}">${ic('edit',13)} Rename</button>
+      <button class="btn ghost sm" data-gact="del" data-g="${esc(g.name)}">${ic('x',13)} Delete group</button></span></div>${tiles(g.servers,g.name)}`}
+  else body=`${L.groups.length?`<section class="gsec"><div class="thd">Groups <span class="gcount">${L.groups.length}</span></div><div class="tgrid">${L.groups.map(g=>gtile(g,by,++i)).join('')}</div></section>`:''}
+    ${L.ungrouped.length||!L.groups.length?`<section class="gsec"><div class="thd">${L.groups.length?'Servers not in a group':'Servers'} <span class="gcount">${L.ungrouped.length}</span></div>${tiles(L.ungrouped,'')}</section>`:''}`;
   $('#home').innerHTML=`
-  <div class="hero" style="align-items:center;margin-bottom:22px"><div>
+  <div class="hero" style="align-items:center;margin-bottom:18px"><div>
       <h1 style="font-size:24px;margin:0;letter-spacing:-.4px;display:flex;align-items:center;gap:10px">${ic(S.page==='pm2'?'bolt':'box',22)} ${PGT[S.page]} servers</h1>
-      <p class="mut small" style="margin-top:4px">Click a server to manage its ${S.page==='pm2'?'PM2 processes':'containers'}${t?' · last checked '+t:''}</p></div>
+      <p class="mut small" style="margin-top:4px">${S.hgroup?'Click a server to see its health and manage it':'Click a group to see its servers, or a server to see its health'}${t?' · last checked '+t:''}</p></div>
     <div class="hero-actions"><button class="btn ghost" id="hrefresh">${ic('restart',15)} Refresh</button><button class="btn" id="hgroup">${ic('folder',15)} New group</button><button class="btn primary" id="hadd">${ic('plus',15)} Add server</button></div></div>
   ${empty?`<div class="empty" style="border:1.5px dashed var(--line2);border-radius:var(--r)"><div class="bigic">${ic(S.page==='pm2'?'bolt':'box',22)}</div><b>No servers on the ${PGT[S.page]} page yet</b>
-      <div style="margin:6px 0 16px">Add a server from your SSH config, or a new one.</div><button class="btn primary" data-addg="">${ic('plus',15)} Add server</button></div>`:''}
-  ${!empty&&(L.ungrouped.length||!L.groups.length)?`<section class="gsec">${L.groups.length?`<div class="gsh"><b class="mut">Ungrouped</b><span class="gcount">${L.ungrouped.length}</span></div>`:''}${cards(L.ungrouped,'')}</section>`:''}
-  ${L.groups.map((g,gi)=>{const col=S.gcol[S.page+':'+g.name];return `<section class="gsec">
-    <div class="gsh"><button class="icon-btn sm" data-gact="col" data-g="${esc(g.name)}"><span class="chev ${col?'':'open'}">${ic('chev',14)}</span></button>
-      <span class="gico">${ic('folder',14)}</span><b>${esc(g.name)}</b><span class="gcount"><span style="color:var(--ok)">●</span> ${online(g.servers)}/${g.servers.length}</span><span class="grow"></span>
-      <span class="gacts">${gi?`<button class="icon-btn sm" data-gact="up" data-g="${esc(g.name)}" title="Move group up">${ic('up',14)}</button>`:''}
-      <button class="icon-btn sm" data-gact="run" data-g="${esc(g.name)}" title="Run a command on all servers of this group">${ic('play',12)}</button>
-      <button class="icon-btn sm" data-gact="add" data-g="${esc(g.name)}" title="Add server to this group">${ic('plus',14)}</button>
-      <button class="icon-btn sm" data-gact="ren" data-g="${esc(g.name)}" title="Rename group">${ic('edit',14)}</button>
-      <button class="icon-btn sm x2" data-gact="del" data-g="${esc(g.name)}" title="Delete group">${ic('x',14)}</button></span></div>
-    ${col?'':cards(g.servers,g.name)}</section>`}).join('')}`;
-  if(!quiet)countUp($('#home'));
-  $('#hrefresh').onclick=e=>busy(e.currentTarget,loadHome);$('#hadd').onclick=()=>addServer('');$('#hgroup').onclick=newGroup;
+      <div style="margin:6px 0 16px">Add a server from your SSH config, or a new one.</div><button class="btn primary" data-addg="">${ic('plus',15)} Add server</button></div>`
+    :`<div class="search hfilter"><span>${ic('search',15)}</span><input id="hq" placeholder="Filter servers by name or address…" autocomplete="off" value="${esc(S.hq||'')}"></div>${body}`}`;
+  const hq=$('#hq');if(hq){hq.oninput=()=>{S.hq=hq.value;renderHome(true)};if(hadFocus){hq.focus();hq.setSelectionRange(caret,caret)}}
+  $('#hrefresh').onclick=e=>busy(e.currentTarget,loadHome);$('#hadd').onclick=()=>addServer(S.hgroup||'');$('#hgroup').onclick=newGroup;
 }
+function gtile(g,by,i){const ss=g.servers.map(n=>by[n]).filter(Boolean),on=ss.filter(s=>!OFF.includes(s.state)).length,off=ss.length-on;
+  const lock=ss.filter(s=>s.state==='need_password').length,run=S.page==='pm2'?null:ss.reduce((a,s)=>a+((counts(s)||{}).run||0),0);
+  return `<div class="gtile" data-opg="${esc(g.name)}" style="--d:${i*25}ms"><span class="tic">${ic('folder',17)}</span>
+    <div class="tbody2"><div class="tname">${esc(g.name)}</div><div class="tsub">${ss.length} server${ss.length==1?'':'s'} · <span class="ok">${on} online</span>${off?` · <span class="bad">${off} offline</span>`:''}${lock?` · <span class="warn">${lock} locked</span>`:''}${run?` · ${run} running`:''}</div></div>
+    <span class="gchev">${ic('chev',16)}</span></div>`}
+function stile(s,i){
+  const pm=S.page==='pm2',st=pm&&s.state!=='unreachable'?'ok':s.state,off=pm?s.state==='unreachable':OFF.includes(s.state),m=s.m||{},c=counts(s),ps=pm?pmSum(s.name):null;
+  let sub;
+  if(off)sub=`<span class="bad">${esc(STATE[st]||st)}</span> · ${esc(s.error||'not reachable')}`;
+  else if(st==='need_password')sub=`<span class="warn">${ic('lock',11)} Locked</span> · click to unlock with sudo`;
+  else if(pm)sub=ps?`<span class="ok">${ps.on} online</span> · ${ps.all-ps.on} stopped${ps.locked?` · <span class="warn">${ps.locked} locked</span>`:''}`:m.pm2?'loading…':'No PM2 running';
+  else sub=c?`<span class="ok">${c.run} running</span> · ${c.all-c.run} stopped`:m.hasdocker===false?'Docker not installed':'loading…';
+  const bar=(p,l)=>{if(p==null)return'';p=clamp(p);return `<i title="${l} ${p}%"><b style="height:${p}%;background:${pcol(p)}"></b></i>`};
+  return `<div class="stile st-${st} ${off?'off':''}" data-open="${esc(s.name)}" style="--d:${i*25}ms" title="${esc(s.name)} · ${esc(s.host||'')}">
+    <span class="tic">${ic('server',17)}</span>
+    <div class="tbody2"><div class="tname">${esc(s.name)}${s.protected?`<span class="shield" title="Protected: changes ask you to type the server name">${ic('shield',12)}</span>`:''}</div><div class="tsub">${sub}</div></div>
+    ${off?'':`<span class="tmeters" title="CPU · Memory · Disk">${bar(cpuPct(m),'CPU')}${bar(m.mem,'Memory')}${bar(m.disk,'Disk')}</span>`}
+    <button class="icon-btn x" data-menu="${esc(s.name)}" title="Edit, move to group, protect, remove">${ic('more',15)}</button></div>`}
 function card(s,i){
   const pm=S.page==='pm2',st=pm&&s.state!=='unreachable'?'ok':s.state;
   const off=pm?s.state==='unreachable':OFF.includes(s.state),m=s.m||{},c=counts(s),cpu=cpuPct(m),ps=pm?pmSum(s.name):null;
@@ -2837,6 +2890,8 @@ $('#home').addEventListener('click',async e=>{
   if(Date.now()-menuAt<1500){e.stopPropagation();return}
   const mn=e.target.closest('[data-menu]'),ga=e.target.closest('[data-gact]'),ad=e.target.closest('[data-addg]'),op=e.target.closest('[data-open]');
   if(mn){e.stopPropagation();return serverMenu(mn.dataset.menu)}
+  const og=e.target.closest('[data-opg]');if(og){S.hgroup=og.dataset.opg;S.hq='';renderHome(true);window.scrollTo(0,0);return}
+  if(e.target.closest('[data-gback]')){S.hgroup=null;renderHome(true);return}
   if(ga){const g=ga.dataset.g,a=ga.dataset.gact;
     if(a==='col'){S.gcol[S.page+':'+g]=!S.gcol[S.page+':'+g];renderHome(true)}
     else if(a==='up')layoutOp('group_up',{group:g});
@@ -2997,12 +3052,22 @@ function openServer(name,thenSelect){
   if(thenSelect)select(thenSelect);
   if($('#flive').checked)startLive();
 }
+function monPanel(s){const m=s.m||{},cpu=cpuPct(m),pm=S.mode==='pm2';
+  const rc=(p,label,sub)=>p==null?'':`<div class="mcard">${ring(p,label)}<div style="min-width:0"><h5>${label}</h5><div class="sm2">${sub}</div></div></div>`;
+  let work;
+  if(pm){const ps=pmSum(s.name);work=`<div class="mcard" style="display:block"><h5>PM2 processes</h5>${ps?`<div class="big">${ps.on}<span class="sm2"> online</span></div><div class="sm2">${ps.all-ps.on} stopped${ps.locked?` · ${ps.locked} locked`:''}</div><div class="cbar"><i style="width:${ps.all?ps.on/ps.all*100:0}%"></i></div>`:'<div class="sm2">loading…</div>'}</div>`}
+  else{const cs=S.containers.filter(c=>c.server===s.name),run=cs.length?cs.filter(c=>c.running).length:m.run,all=cs.length||m.all;
+    work=`<div class="mcard" style="display:block"><h5>Containers</h5>${all!=null?`<div class="big">${run}<span class="sm2"> running</span></div><div class="sm2">${all-run} stopped · ${all} total</div><div class="cbar"><i style="width:${all?run/all*100:0}%"></i></div>`:`<div class="sm2">${m.hasdocker===false?'Docker not installed':'loading…'}</div>`}</div>`}
+  const kv=[['OS',m.os],['Uptime',m.uptime&&fmtUp(m.uptime)],['Docker',!pm&&m.ver],['Address',s.host]].filter(x=>x[1]);
+  return rc(cpu,'CPU',m.load!=null?`load ${m.load} on ${m.nproc} vCPU`:'')+rc(m.mem,'Memory','RAM in use')+rc(m.disk,'Disk','root filesystem (/)')+work
+    +(kv.length?`<div class="mcard"><div class="kv2">${kv.map(([k,v])=>`<span>${k}</span><b title="${esc(v)}">${esc(v)}</b>`).join('')}</div></div>`:'')}
 function renderLHead(){
   const s=S.fleet.find(x=>x.name===S.fserver);
   $('#ltitle').innerHTML=S.fserver?`<span class="pulse st-${s?.state||'ok'}" style="margin:0"></span>${esc(S.fserver)}${s?.protected?` <span class="tag prot" title="Changes ask you to type the server name">${ic('shield',11)} protected</span>`:''}`:`${ic('globe',22)} All servers`;
   $('#lsub').textContent=S.fserver?(s?.host||''):`${S.fleet.filter(x=>!OFF.includes(x.state)).length} servers online`;
   const m=s?.m||{},chip=(l,p)=>p==null?'':`<div class="chip">${l} <div class="mbar"><i style="width:${clamp(p)}%;background:${pgrad(p)}"></i></div><b>${clamp(p)}%</b></div>`;
-  $('#lmetrics').innerHTML=S.fserver?chip('CPU',cpuPct(m))+chip('MEM',m.mem)+chip('DISK',m.disk)+(m.uptime?`<div class="chip">Uptime <b>${fmtUp(m.uptime)}</b></div>`:'')+(m.ver&&S.page==='docker'?`<div class="chip">Docker <b>${esc(m.ver)}</b></div>`:''):'';
+  $('#lmetrics').innerHTML='';void chip;
+  $('#lmon').innerHTML=S.fserver&&s?monPanel(s):'';
   modeCounts();
 }
 async function scan(server){
@@ -3073,7 +3138,8 @@ const pKey=p=>p.user+'|'+p.home+'|'+p.id;
 function applyMode(m){S.mode=m;$$('#mseg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m));
   $('#lcomp').classList.toggle('hidden',m==='pm2');$('#pmusers').classList.toggle('hidden',m!=='pm2');$('#pmlogs').classList.toggle('hidden',m!=='pm2');
   if(m==='pm2'&&S.dtab!=='containers')setDtab('containers');$('#dtabs').classList.toggle('hidden',m!=='docker'||!S.fserver);renderBulk();
-  $('#q').placeholder=m==='pm2'?'Filter PM2 processes, users, scripts…':'Filter containers, images, projects…'}
+  $('#q').placeholder=m==='pm2'?'Filter PM2 processes, users, scripts…':'Filter containers, images, projects…';
+  const s2=S.fleet.find(x=>x.name===S.fserver);if(s2&&S.view==='list')$('#lmon').innerHTML=monPanel(s2)}
 $('#mseg').onclick=async e=>{const b=e.target.closest('[data-m]');if(!b||b.dataset.m===S.mode)return;
   if(S.sel&&!await closeDetail())return;applyMode(b.dataset.m);renderRows();
   if(S.mode==='pm2'&&!S.pm2[S.fserver])pm2Scan()};
@@ -3092,7 +3158,7 @@ async function pm2Scan(quiet){const srv=S.fserver;if(!srv)return;const b=$('#res
   catch(e){if(S.mode==='pm2'&&!quiet)toast(esc(e.message),'bad');if(!S.pm2[srv])S.pm2[srv]={me:'',daemons:[],error:e.message}}
   finally{if(mine){b.disabled=false;b.innerHTML=ic('restart',15)+' Refresh'}}
   if(S.fserver!==srv)return;modeCounts();
-  if(S.mode==='pm2'&&S.view==='list'){renderRows(quiet);pRefreshSel();
+  if(S.mode==='pm2'&&S.view==='list'){renderRows(quiet);const s2=S.fleet.find(x=>x.name===srv);if(s2)$('#lmon').innerHTML=monPanel(s2);pRefreshSel();
     if(S.pendingP){const p=pm2Procs().find(x=>x.user===S.pendingP.user&&x.name===S.pendingP.name);S.pendingP=null;if(p)pselect(p)}}}
 function pRefreshSel(){if(!S.sel||S.sel.kind!=='pm2')return;const p=pm2Procs().find(x=>pKey(x)===pKey(S.sel));if(p){S.sel={...p,kind:'pm2'};renderPHead();updPGauges()}}
 function role(dm){return dm.mine?'<span class="urole me">you</span>':dm.user==='root'?'<span class="urole root">root · sudo</span>':'<span class="urole">via sudo</span>'}
