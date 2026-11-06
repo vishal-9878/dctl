@@ -2604,7 +2604,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
     <div class="search"><span id="sic"></span><input id="q" placeholder="Filter containers, images, projects…" autocomplete="off"><kbd>/</kbd></div>
     <div class="seg" id="fseg"><button data-f="all" class="on">All <span id="c-all">0</span></button><button data-f="run">Running <span id="c-run">0</span></button><button data-f="stop">Stopped <span id="c-stop">0</span></button></div>
     <label class="toggle" id="lcomp"><input type="checkbox" id="fcomp"><span></span>Compose only</label>
-    <label class="toggle" id="llive" title="refresh stats every 5s"><input type="checkbox" id="flive"><span></span>Live stats</label>
+    <label class="toggle" id="llive" title="Refresh CPU/memory every 5s and container status every 10s (remembered)"><input type="checkbox" id="flive"><span></span>Live stats</label>
     <button class="btn ghost hidden" id="pmlogs" title="Watch the logs of many PM2 processes together"></button>
     <button class="btn ghost hidden" id="pmusers" title="Choose which users' PM2 to show"></button>
     <button class="btn ghost" id="rescan"></button>
@@ -3838,10 +3838,16 @@ async function fetchStats(servers){
   await Promise.all(servers.map(async s=>{try{const j=await raw('/api/stats',{server:s});if(j.ok)for(const[n,v] of Object.entries(j.stats))S.stats[s+'/'+n]=v}catch(e){}}));
 }
 function liveServers(){return S.fserver?[S.fserver]:[...new Set(S.containers.map(c=>c.server))]}
-async function liveTick(){if(S.mode==='pm2')return pm2Scan(true);await fetchStats(liveServers());if(S.view==='list'&&S.liveTimer){renderRows(true);updGauges()}}
+async function scanQuiet(server){   // live mode: pick up containers that started, stopped or restarted, without the spinner
+  try{const j=await api('/api/scan',{server});if(!S.liveTimer||S.fserver!==server)return;mergeFleet(j.servers);S.containers=j.containers;
+    const ks=new Set(S.containers.map(c=>c.server+'/'+c.name));[...S.picked].forEach(k=>ks.has(k)||S.picked.delete(k));renderLHead();
+    if(S.sel&&S.sel.kind!=='pm2'){const c=S.containers.find(c=>c.server===S.sel.server&&c.name===S.sel.name);if(c){S.sel=c;renderHead()}}}catch(_){}}
+async function liveTick(){if(S.mode==='pm2')return pm2Scan(true);S.liveN=(S.liveN||0)+1;
+  await Promise.all([fetchStats(liveServers()),S.fserver&&S.liveN%2===0?scanQuiet(S.fserver):null]);if(S.view==='list'&&S.liveTimer){renderRows(true);updGauges()}}
 function startLive(){stopLive();S.liveTimer=setInterval(liveTick,5000);renderRows();liveTick()}
 function stopLive(){clearInterval(S.liveTimer);S.liveTimer=null}
-$('#flive').onchange=e=>{if(e.target.checked){startLive();toast('Live stats on — refreshing every 5s','info',2500)}else{stopLive();renderRows()}};
+$('#flive').checked=(()=>{try{return localStorage.getItem('dctl.live')!=='0'}catch(_){return true}})();
+$('#flive').onchange=e=>{try{localStorage.setItem('dctl.live',e.target.checked?'1':'0')}catch(_){}if(e.target.checked){startLive();toast('Live stats on — refreshing every 5s','info',2500)}else{stopLive();renderRows()}};
 
 // ---------- detail drawer ----------
 function dirty(){return S.file&&edVal()!==null&&edVal()!==S.orig}
