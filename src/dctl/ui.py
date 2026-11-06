@@ -587,6 +587,25 @@ def r_stats(d):
     return {"server": s, "stats": st}
 
 
+HIST_SCRIPT = r"""for f in "$HOME/.bash_history" "$HOME/.zsh_history"; do [ -r "$f" ] && tail -n 3000 "$f"; done 2>/dev/null; true"""
+
+
+def r_hist(d):
+    """Shell history of the login user, used only to suggest commands in the web terminal (kept in memory)."""
+    rc, out, err = run(d["server"], HIST_SCRIPT, timeout=20)
+    seen, res = set(), []
+    for line in reversed(out.decode("utf-8", "replace").splitlines()):
+        if line.startswith(": ") and ";" in line[:24]:          # zsh extended history ": 1700000000:0;cmd"
+            line = line.split(";", 1)[1]
+        line = line.strip()
+        if not line or line.startswith("#") or len(line) > 400 or line in seen:
+            continue
+        seen.add(line); res.append(line)
+        if len(res) >= 3000:
+            break
+    return {"server": d["server"], "hist": res}          # newest first
+
+
 def ensure_pubkey(key=None):
     if key:
         kp = os.path.expanduser(key)
@@ -1468,7 +1487,7 @@ def r_index(d):
 
 ROUTES = {"/api/servers": r_servers, "/api/server_add": r_server_add, "/api/server_remove": r_server_remove,
           "/api/server_get": r_server_get, "/api/server_edit": r_server_edit,
-          "/api/scan": r_scan, "/api/stats": r_stats,"/api/sudo": r_sudo, "/api/file": r_file, "/api/validate": r_validate,
+          "/api/scan": r_scan, "/api/stats": r_stats, "/api/hist": r_hist,"/api/sudo": r_sudo, "/api/file": r_file, "/api/validate": r_validate,
           "/api/save": r_save, "/api/discard": r_discard, "/api/action": r_action, "/api/remove": r_remove, "/api/bulk": r_bulk, "/api/dres": r_dres, "/api/dres_rm": r_dres_rm, "/api/dres_bulk": r_dres_bulk, "/api/compose": r_compose,
           "/api/logs": r_logs, "/api/inspect": r_inspect, "/api/exec": r_exec,
           "/api/pm2": r_pm2, "/api/disk": r_disk, "/api/cleanup": r_cleanup, "/api/multirun": r_multirun, "/api/cmds": r_cmds, "/api/index": r_index, "/api/pm2_users": r_pm2_users, "/api/layout": r_layout, "/api/layout_get": lambda d: {"layout": ensure_layout()[d.get("page") if d.get("page") in PAGES else "docker"]}, "/api/pm2_action": r_pm2_action, "/api/pm2_save": r_pm2_save, "/api/pm2_logs": r_pm2_logs}
@@ -2436,6 +2455,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
 .hidnote{display:flex;align-items:center;gap:8px;padding:12px 16px;color:var(--mut);font-size:13px}.hidnote a{color:#b3a6ff;cursor:pointer;font-weight:600}.hidnote a:hover{text-decoration:underline}
 #termp{position:fixed;inset:0;z-index:60;background:rgba(3,4,8,.55);backdrop-filter:blur(3px);display:flex;align-items:flex-end;justify-content:center;padding:70px 24px 24px}
 #termp.hidden{display:none}
+.tsg{position:absolute;pointer-events:none;white-space:pre;overflow:hidden;color:#5c6378;z-index:5;display:none}
 .tauto{font-size:12.5px;margin:0 6px;white-space:nowrap}.tauto span{transform:scale(.85)}
 .tpbox{width:min(1400px,100%);height:min(78vh,900px);display:flex;flex-direction:column;border-radius:14px;overflow:hidden;border:1px solid var(--line2);background:#05060a;box-shadow:0 30px 80px -20px rgba(0,0,0,.8),0 0 0 1px rgba(124,92,255,.15);animation:rise .25s both}
 #termp.full{padding:0}#termp.full .tpbox{width:100%;height:100%;border-radius:0}
@@ -2625,6 +2645,7 @@ mark{background:rgba(255,214,10,.35);color:inherit;border-radius:2px}
     <button class="btn ghost sm" id="tfiles" title="Browse / download files of this server">Files</button>
     <button class="btn ghost sm" id="tsudo" title="Become root on this server (asks your sudo password in the terminal)">sudo -i</button>
     <label class="toggle tauto" title="Selected text is copied to the clipboard automatically. Ctrl+Shift+C copies, Ctrl+Shift+V or right-click pastes."><input type="checkbox" id="tauto"><span></span>Copy on select</label>
+    <label class="toggle tauto" title="Suggest commands from your history as you type (like zsh-autosuggestions). Press → or End to accept, Ctrl+→ for one word. Nothing is installed on the server."><input type="checkbox" id="tsugg"><span></span>Suggestions</label>
     <button class="btn ghost sm" id="tnew" title="Another session on this server">+ New</button>
     <button class="btn ghost sm" id="tfull" title="Full screen">⤢</button>
     <button class="btn ghost sm" id="tmin" title="Hide — sessions keep running">Minimize</button></div>
@@ -3484,10 +3505,16 @@ async function openTerm(server,opts){opts=opts||{};
     theme:{background:'#05060a',foreground:'#d7dbea',cursor:'#9d8bff',selectionBackground:'rgba(124,92,255,.35)',black:'#1b1e2b',brightBlack:'#5c6378',
       red:'#ff5c7a',green:'#22e3a1',yellow:'#ffc94d',blue:'#7aa2ff',magenta:'#c49bff',cyan:'#22d3ee',white:'#d7dbea'}});
   const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(el);
-  const tab={id,server,container:opts.container||'',el,term,fit,ws:null,state:'connecting'};T.tabs.push(tab);
+  const tab={id,server,container:opts.container||'',el,term,fit,ws:null,state:'connecting',sg:{pending:true,y:null,x:0,suf:''}};T.tabs.push(tab);
+  tab.sg.el=document.createElement('div');tab.sg.el.className='tsg';el.appendChild(tab.sg.el);
   showTermPanel();activateTerm(id);connectTerm(tab);
-  term.onData(d=>{if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x00'+d)});
-  term.attachCustomKeyEventHandler(e=>{if(e.type!=='keydown'||!e.ctrlKey||e.altKey||e.metaKey)return true;const k=e.key.toLowerCase();
+  term.onData(d=>{sgKey(tab,d);if(tab.ws&&tab.ws.readyState===1)tab.ws.send('\x00'+d)});
+  term.onRender(()=>sgSoon(tab));term.onScroll(()=>sgSoon(tab));
+  if(!tab.container)histRemote(server);
+  term.attachCustomKeyEventHandler(e=>{
+    if(e.type==='keydown'&&!e.altKey&&!e.metaKey&&!e.shiftKey&&tab.sg.suf&&((!e.ctrlKey&&(e.key==='ArrowRight'||e.key==='End'))||(e.ctrlKey&&e.key==='ArrowRight'))){
+      if(sgAccept(tab,e.ctrlKey)){e.preventDefault();return false}}
+    if(e.type!=='keydown'||!e.ctrlKey||e.altKey||e.metaKey)return true;const k=e.key.toLowerCase();
     if(e.shiftKey&&k==='c'){e.preventDefault();termCopy(term);return false}                 // Ctrl+Shift+C: copy
     if(e.shiftKey&&k==='v'){e.preventDefault();termPaste(term);return false}                // Ctrl+Shift+V: paste
     if(!e.shiftKey&&k==='c'&&term.hasSelection()){e.preventDefault();termCopy(term);term.clearSelection();return false}  // Ctrl+C with a selection copies, otherwise it interrupts
@@ -3505,6 +3532,56 @@ function connectTerm(tab){
   ws.onclose=()=>{if(tab.ws!==ws)return;tab.state='closed';renderTermTabs();tab.term.write('\r\n\x1b[33mDisconnected.\x1b[0m Press \x1b[1mReconnect\x1b[0m to start a new session.\r\n')};
 }
 function curTab(){return T.tabs.find(t=>t.id===T.cur)}
+// ---- command suggestions from history (zsh-autosuggestions style, all in the browser) ----
+// The typed command is read from the screen (from where the prompt ended to the end of the line), so tab completion,
+// history recall and line editing by the remote shell are all taken into account, and text that is not echoed
+// (passwords) is never seen or stored.
+T.sugg=(()=>{try{return localStorage.getItem('dctl.suggest')!=='0'}catch(_){return true}})();
+T.hist=(()=>{try{return JSON.parse(localStorage.getItem('dctl.hist')||'{}')||{}}catch(_){return{}}})();   // {"server" or "server›container": [old … new]}
+T.rhist={};     // server -> its own shell history (newest first), memory only
+function histKey(tab){return tab.server+(tab.container?'›'+tab.container:'')}
+function histAdd(tab,cmd){if(!cmd||cmd.length>400||/^\s/.test(cmd))return;const k=histKey(tab),a=(T.hist[k]||[]).filter(x=>x!==cmd);a.push(cmd);T.hist[k]=a.slice(-500);
+  clearTimeout(T.histSave);T.histSave=setTimeout(()=>{try{localStorage.setItem('dctl.hist',JSON.stringify(T.hist))}catch(_){}},400)}
+async function histRemote(server){if(T.rhist[server])return;T.rhist[server]=[];
+  try{const j=await raw('/api/hist',{server});if(j.ok&&j.hist)T.rhist[server]=j.hist}catch(_){}}
+function sgFind(tab,cur){
+  const hit=a=>{for(let i=a.length-1;i>=0;i--){const c=a[i];if(c.length>cur.length&&c.startsWith(cur))return c}return null};
+  const mine=hit(T.hist[histKey(tab)]||[]);if(mine)return mine;
+  const r=T.rhist[tab.server]||[];for(const c of r)if(c.length>cur.length&&c.startsWith(cur))return c;
+  for(const k in T.hist){const c=hit(T.hist[k]);if(c)return c}return null}
+function sgText(tab,y,x){   // text from (row y, column x) to the end of that line and the lines it wraps into
+  const b=tab.term.buffer.active;let s='';
+  for(let i=0;i<=20;i++,y++){const l=b.getLine(y);if(!l)return null;s+=l.translateToString(false,i?0:x);const n=b.getLine(y+1);if(!n||!n.isWrapped)break}
+  return s.replace(/\s{4,}\S.*$/,'').trimEnd()}    // drop a right-side prompt (zsh RPROMPT)
+function sgFlush(tab){const r=tab.sg.rec;if(!r)return;tab.sg.rec=null;clearTimeout(r.t);
+  if(tab.term.buffer.active.type!=='normal')return;const c=sgText(tab,r.y,r.x);
+  histAdd(tab,c&&c.startsWith(r.now)?c:r.now)}     // later text only if it just completes what was on screen at Enter
+function sgRead(tab){   // {text, atEnd} of the command being typed, or null when unknown
+  const a=tab.sg,t=tab.term,b=t.buffer.active;if(a.pending||a.y==null||b.type!=='normal')return null;
+  const cy=b.baseY+b.cursorY;if(cy<a.y||cy-a.y>20)return null;
+  const text=sgText(tab,a.y,a.x);if(text===null)return null;
+  const off=(cy-a.y)*t.cols+b.cursorX-a.x;return{text,atEnd:off===text.length}}
+function sgKey(tab,d){const a=tab.sg,b=tab.term.buffer.active;sgFlush(tab);
+  if(a.pending&&b.type==='normal'){a.y=b.baseY+b.cursorY;a.x=b.cursorX;a.pending=false}
+  if(d.includes('\r')||d.includes('\n')){   // remember the command a moment later, once the shell has echoed every typed character
+    const now=b.type==='normal'&&!a.pending?sgText(tab,a.y,a.x):'';    // nothing on screen (e.g. a password that is not echoed) -> nothing remembered
+    if(now)a.rec={y:a.y,x:a.x,now,t:setTimeout(()=>sgFlush(tab),600)};a.pending=true}
+  else if(d==='\x03'||d==='\x04'||d==='\x0c')a.pending=true;
+  sgHide(tab)}
+function sgHide(tab){tab.sg.suf='';tab.sg.el.style.display='none'}
+function sgSoon(tab){if(tab.sg.raf)return;tab.sg.raf=requestAnimationFrame(()=>{tab.sg.raf=0;sgShow(tab)})}
+function sgShow(tab){const a=tab.sg,t=tab.term,b=t.buffer.active;
+  if(!T.sugg||tab.state!=='open'||b.viewportY!==b.baseY)return sgHide(tab);
+  const r=sgRead(tab);if(!r||!r.atEnd||!r.text.trim())return sgHide(tab);
+  const full=sgFind(tab,r.text);if(!full)return sgHide(tab);
+  const room=t.cols-b.cursorX;if(room<1)return sgHide(tab);
+  const scr=tab.el.querySelector('.xterm-screen');if(!scr)return sgHide(tab);
+  const cw=scr.clientWidth/t.cols,ch=scr.clientHeight/t.rows,sr=scr.getBoundingClientRect(),er=tab.el.getBoundingClientRect();
+  a.suf=full.slice(r.text.length);const e=a.el;e.textContent=a.suf.slice(0,room).replace(/\n.*/s,'');
+  Object.assign(e.style,{display:'block',left:(sr.left-er.left+b.cursorX*cw)+'px',top:(sr.top-er.top+b.cursorY*ch)+'px',height:ch+'px',lineHeight:ch+'px',
+    maxWidth:(room*cw)+'px',fontFamily:t.options.fontFamily,fontSize:t.options.fontSize+'px'})}
+function sgAccept(tab,word){const a=tab.sg;if(!a.suf||!tab.ws||tab.ws.readyState!==1)return false;
+  const part=word?(a.suf.match(/^\s*\S+/)||[a.suf])[0]:a.suf;tab.ws.send('\x00'+part);sgHide(tab);return true}
 T.auto=(()=>{try{return localStorage.getItem('dctl.autocopy')!=='0'}catch(_){return true}})();
 function termAuto(){return T.auto}
 async function clipWrite(txt){
@@ -3538,6 +3615,8 @@ $('#tmin').onclick=hideTermPanel;$('#tfiles').onclick=()=>{const t=curTab();if(t
 $('#tnew').onclick=()=>{const t=curTab();if(t)openTerm(t.server,{container:t.container})};
 $('#trecon').onclick=()=>{const t=curTab();if(t){t.term.reset();connectTerm(t)}};
 $('#tsudo').onclick=()=>{const t=curTab();if(t&&t.ws&&t.ws.readyState===1){t.ws.send('\x00sudo -i\r');t.term.focus()}};
+$('#tsugg').checked=T.sugg;$('#tsugg').onchange=e=>{T.sugg=e.target.checked;try{localStorage.setItem('dctl.suggest',T.sugg?'1':'0')}catch(_){}
+  T.tabs.forEach(t=>T.sugg?sgSoon(t):sgHide(t));const t=curTab();if(t)t.term.focus()};
 $('#tauto').checked=termAuto();$('#tauto').onchange=e=>{T.auto=e.target.checked;try{localStorage.setItem('dctl.autocopy',e.target.checked?'1':'0')}catch(_){}
   toast(e.target.checked?'Selected text is copied automatically':'Copy on select is off — use Ctrl+Shift+C','info',2200);const t=curTab();if(t)t.term.focus()};
 $('#tfull').onclick=()=>{$('#termp').classList.toggle('full');const t=curTab();if(t)setTimeout(()=>{try{t.fit.fit()}catch(_){}},60)};

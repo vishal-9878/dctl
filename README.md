@@ -37,6 +37,8 @@ dctl is a **desktop app** with its own window (Linux, macOS, Windows), plus a Ba
 
 ### Servers
 - **Web terminal**: a full SSH shell to any server in the browser, with tabs. Minimised terminals stay open.
+  - **Command suggestions** as you type, from your history and the server's own shell history (like zsh-autosuggestions). Press → or End to accept, Ctrl+→ for one word. Nothing is installed on the server.
+  - **Copy on select**, Ctrl+Shift+C / Ctrl+Shift+V, and right-click to paste.
 - **Files**: browse any folder; view, copy, download or **edit** a file (with a diff review and backup); **upload** files from your computer (button or drag and drop). It uses sudo automatically, only where you need it.
 - **Protected servers**: mark production servers as protected. Then every change there (restart, stop, delete, edit, upload, cleanup, …) asks you to type the server name first.
 - **Disk cleanup**: shows what is using space (Docker images, build cache, container logs, journald, rotated logs, PM2 logs, big folders) and cleans it with one click, showing how much space was freed.
