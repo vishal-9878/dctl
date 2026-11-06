@@ -1777,7 +1777,43 @@ def r_fwrite(d):
     return res
 
 
-ROUTES.update({"/api/fread": r_fread, "/api/fdiff": r_fdiff, "/api/fwrite": r_fwrite})
+def _compose_target(s, path):
+    """The compose project a file belongs to: the running/stopped project that was started with it
+    (same project name and all its -f files), else a new project in the file's folder."""
+    rc, out, err = run(s, "readlink -f " + _rpath(path) + " 2>/dev/null || echo " + _rpath(path), timeout=20)
+    ap = out.decode("utf-8", "replace").strip() or path
+    rc, out, err = drun(s, f"$D ps -a --format {q(FORMAT)}", timeout=60)
+    if rc == 0:
+        names = {}
+        for line in out.decode("utf-8", "replace").splitlines():
+            f = line.split("\t")
+            if len(f) >= 7 and f[3] and ap in f[6].split(","):
+                names.setdefault((f[3], f[5], f[6]), []).append(f[0])
+        if names:
+            (proj, wd, files), cs = next(iter(names.items()))
+            return {"path": ap, "project": proj, "workdir": wd or os.path.dirname(ap), "files": files.split(","), "containers": sorted(cs)}
+    return {"path": ap, "project": None, "workdir": os.path.dirname(ap) or "/", "files": [ap], "containers": []}
+
+
+def r_fcompose(d):
+    s, op = d["server"], d.get("op")
+    t = _compose_target(s, _clean_path(d.get("path")))
+    pre = (f"cd {q(t['workdir'])} && $C " + (f"-p {q(t['project'])} " if t["project"] else "")
+           + " ".join("-f " + q(f) for f in t["files"]))
+    shown = pre.replace("$C", "docker compose")
+    if op == "info":
+        return {**t, "cmd": shown}
+    if op == "check":
+        rc, out, err = drun(s, pre + " config -q 2>&1", timeout=120)
+        return {**t, "cmd": shown, "valid": rc == 0, "output": (text(out) + err).strip()}
+    if op not in ("up", "pull"):
+        raise RemoteError("bad compose command")
+    guard(d, s, f"docker compose {'pull + ' if op == 'pull' else ''}up -d ({t['project'] or t['workdir']})")
+    cmd = f"{pre} config -q 2>&1 && " + (f"{pre} pull 2>&1 && " if op == "pull" else "") + f"{pre} up -d 2>&1; r=$?; {pre} ps 2>&1; exit $r"
+    return {**t, "cmd": shown, **out_of(*drun(s, cmd, timeout=900))}
+
+
+ROUTES.update({"/api/fread": r_fread, "/api/fdiff": r_fdiff, "/api/fwrite": r_fwrite, "/api/fcompose": r_fcompose})
 
 
 def r_protect(d):
@@ -2746,6 +2782,9 @@ function confirmBox(msg,ok='Confirm',danger){return new Promise(res=>{
 // second layer above the main window, so a question never replaces what is open (editor, files, …)
 function dlg2(h){$('#mbox2').className='box wide';$('#mbox2').innerHTML=h;$('#modal2').classList.remove('hidden')}
 function closeDlg2(){$('#modal2').classList.add('hidden');$('#mbox2').innerHTML=''}
+function confirm2(msg,ok='Confirm'){return new Promise(res=>{   // like confirmBox, but on top of an open window (editor, files…)
+  dlg2(`<h3>${ic('info',20)} Are you sure?</h3><p>${msg}</p><div class="row end"><button class="btn ghost" id="c2no">Cancel</button><button class="btn primary" id="c2yes">${esc(ok)}</button></div>`);
+  $('#c2no').onclick=()=>{closeDlg2();res(false)};$('#c2yes').onclick=()=>{closeDlg2();res(true)};$('#c2yes').focus()})}
 function protectConfirm(server,what){return new Promise(res=>{
   dlg2(`<h3>${ic('shield',20)} ${esc(server)} is protected</h3>
    <p>You are about to <b>${esc(what||'make a change')}</b> on a protected server.</p>
@@ -3932,6 +3971,7 @@ function fbEdit(full,it){const dir=full.replace(/\/[^\/]*$/,'')||'/';
    <div class="row" style="gap:8px;margin-top:4px;flex-wrap:wrap"><button class="btn sm" id="edback">${ic('back',13)} Files</button>
      <span id="ednote" class="dim small grow"></span>
      <label class="toggle" title="Before saving, copy the current file to ${esc(it.name)}.bak.<date> next to it"><input type="checkbox" id="edbak" checked><span></span>Keep backup</label>
+     <button class="btn sm hidden" id="edapply" title="Run docker compose up -d with this file (asks first)">${ic('play',12)} Apply compose</button>
      <button class="btn sm" id="edreload" title="Load the file again from the server">${ic('restart',13)} Reload</button>
      <button class="btn sm primary" id="edreview" disabled>${ic('check',13)} Review &amp; save</button></div>
    <div id="edwrap" style="margin-top:10px"><div class="sk" style="height:62vh;border-radius:12px"></div></div>
@@ -3941,12 +3981,38 @@ function fbEdit(full,it){const dir=full.replace(/\/[^\/]*$/,'')||'/';
   $('#edback').onclick=async()=>{if(await edLeave()){FB.ed=null;openFiles(FB.server,dir)}};
   $('#edreload').onclick=async()=>{if(await edLeave())edLoad()};
   $('#edreview').onclick=()=>edReview();
+  $('#edapply').onclick=async()=>{if(edDirty()){toast('Save your changes first, then apply them','info');return}composePanel()};
   edLoad()}
+function isCompose(name,content){return /(^|[-_.])compose[^\/]*\.ya?ml$/i.test(name)||(/\.ya?ml$/i.test(name)&&/^services:\s*$/m.test(content||''))}
+async function composePanel(){const E=FB.ed;if(!E)return;const server=FB.server;
+  const r=$('#edrev');$('#edwrap').classList.add('hidden');r.classList.remove('hidden');
+  r.innerHTML=`<div class="mut" style="padding:20px 0;text-align:center"><span class="spin"></span> Looking for the compose project of this file…</div>`;
+  let t;try{t=await api('/api/fcompose',{server,path:E.path,op:'info'})}catch(e){r.innerHTML=`<div class="note bad">${esc(e.message)}</div>`;return}
+  if(FB.ed!==E)return;
+  r.innerHTML=`<div class="note ${t.project?'good':'warn'}">${t.project?`This file belongs to compose project <b>${esc(t.project)}</b> (${t.containers.length} container${t.containers.length==1?'':'s'}: ${t.containers.map(esc).join(', ')}).
+      ${t.files.length>1?`It was started with ${t.files.length} files; all of them are used.`:''}`:`No container was started from this file yet, so <b>up -d</b> starts a new project in <code>${esc(t.workdir)}</code>.`}</div>
+    <div class="mut small" style="margin:8px 0 4px">Command</div><pre class="term chrome" style="white-space:pre-wrap">${esc(t.cmd)} up -d</pre>
+    <div id="cpout"></div>
+    <div class="row end" style="margin-top:8px;gap:8px;flex-wrap:wrap"><button class="btn ghost" id="cpback">${ic('back',14)} Back to editor</button>
+      <button class="btn" id="cpcheck">${ic('check',14)} Check file</button>
+      <button class="btn" id="cppull" title="Pull newer images, then up -d">${ic('download',14)} Pull &amp; apply</button>
+      <button class="btn primary" id="cpup">${ic('play',13)} Apply (up -d)</button></div>`;
+  const out=(ok,title,txt)=>{$('#cpout').innerHTML=`<div class="note ${ok?'good':'bad'}" style="margin-top:8px">${title}</div>${txt?`<pre class="term chrome" style="max-height:40vh;overflow:auto;white-space:pre-wrap">${esc(txt)}</pre>`:''}`};
+  $('#cpback').onclick=()=>{r.classList.add('hidden');$('#edwrap').classList.remove('hidden');E.cm.refresh();E.cm.focus()};
+  $('#cpcheck').onclick=e=>busy(e.currentTarget,async()=>{try{const j=await api('/api/fcompose',{server,path:E.path,op:'check'});
+      out(j.valid,j.valid?`${ic('check',14)} The compose file is valid.`:`${ic('alert',14)} The compose file has errors:`,j.valid?'':j.output)}catch(er){out(false,esc(er.message))}});
+  const go=op=>async e=>{
+    if(!await confirm2(`Run <b>docker compose ${op==='pull'?'pull + ':''}up -d</b> on <b>${esc(server)}</b>?<br><span class="mut small">${op==='pull'?'Newer images are pulled first. ':''}Containers whose settings or image changed are recreated; the others keep running. The file is checked first and nothing runs if it has errors.</span>`,op==='pull'?'Pull & apply':'Apply'))return;
+    await busy(e.currentTarget,async()=>{try{const j=await api('/api/fcompose',{server,path:E.path,op});
+      out(j.rc===0,j.rc===0?`${ic('check',14)} Applied. Current state:`:`${ic('alert',14)} docker compose failed (exit ${j.rc}):`,j.output);
+      if(j.rc===0){toast(`Applied <b>${esc(E.name)}</b> on <b>${esc(server)}</b>`,'ok');if(S.view==='list'&&S.fserver===server)scan(server)}}
+    catch(er){out(false,esc(er.message))}})};
+  $('#cpup').onclick=go('up');$('#cppull').onclick=go('pull')}
 async function edLoad(){const E=FB.ed;if(!E)return;$('#edrev').classList.add('hidden');const w=$('#edwrap');w.classList.remove('hidden');
   w.innerHTML='<div class="sk" style="height:62vh;border-radius:12px"></div>';$('#edreview').disabled=true;
   let j;try{j=await api('/api/fread',{server:FB.server,path:E.path})}catch(e){w.innerHTML=`<div class="note bad">${esc(e.message)}</div>`;return}
   if(FB.ed!==E)return;
-  E.orig=j.content;E.sha=j.sha;E.writable=j.writable;E.path=j.path||E.path;
+  E.orig=j.content;E.sha=j.sha;E.writable=j.writable;E.path=j.path||E.path;E.compose=isCompose(E.name,j.content);$('#edapply').classList.toggle('hidden',!E.compose);
   const mode=await cmLoad(cmMode(E.name,E.path));
   const ro=j.writable==='no';
   const note=()=>{$('#ednote').innerHTML=[edDirty()&&'<b style="color:var(--warn)">● unsaved changes</b>',j.sudo&&`${ic('lock',12)} read with sudo`,
@@ -3971,10 +4037,11 @@ async function edReview(){const E=FB.ed;if(!E||!E.cm||E.writable==='no')return;c
   $('#edsave').onclick=e=>edSave(e.currentTarget,content)}
 async function edSave(btn,content){const E=FB.ed;if(!E)return;
   await busy(btn,async()=>{try{const j=await api('/api/fwrite',{server:FB.server,path:E.path,content,sha:E.sha,backup:$('#edbak').checked});
-      E.orig=content;E.sha=j.sha;toast(`Saved <b>${esc(E.name)}</b>`,'ok');
+      E.orig=content;E.sha=j.sha;toast(`Saved <b>${esc(E.name)}</b>`,'ok');$('#edreview').disabled=true;$('#ednote').innerHTML='';
       $('#edrev').innerHTML=`<div class="note good">${ic('check',15)} <b>Saved</b> <code>${esc(FB.server)}:${esc(E.path)}</code>${j.sudo?' <span class="mut">(with sudo)</span>':''}
         ${j.backup?`<br><span class="mut small">Backup: <code>${esc(j.backup)}</code></span>`:''}</div>
-        <div class="row" style="margin-top:8px"><button class="btn primary" id="edmore">${ic('edit',14)} Continue editing</button><button class="btn ghost" id="edfiles">${ic('back',14)} Back to files</button></div>`;
+        <div class="row" style="margin-top:8px;gap:8px">${E.compose?`<button class="btn primary" id="edapply2">${ic('play',13)} Apply with docker compose</button>`:''}<button class="btn ${E.compose?'':'primary'}" id="edmore">${ic('edit',14)} Continue editing</button><button class="btn ghost" id="edfiles">${ic('back',14)} Back to files</button></div>`;
+      if(E.compose)$('#edapply2').onclick=()=>composePanel();
       $('#edmore').onclick=()=>{$('#edrev').classList.add('hidden');$('#edwrap').classList.remove('hidden');$('#edreview').disabled=true;E.cm.refresh();E.cm.focus();$('#ednote').innerHTML=''};
       $('#edfiles').onclick=()=>{FB.ed=null;openFiles(FB.server,E.dir)}}
     catch(e){$('#edrev').insertAdjacentHTML('afterbegin',`<div class="note bad" style="margin-bottom:8px">${esc(e.message)}</div>`)}})}
