@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>dctl APT repository</title>
+<style>body{font:15px/1.6 system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px}pre{background:#f4f4f6;padding:12px;border-radius:8px;overflow:auto}</style>
+<h1>dctl APT repository</h1>
+<p>Install <a href="https://github.com/vishal-9878/dctl">dctl</a> on Ubuntu / Debian and get updates with <code>apt upgrade</code>:</p>
+<pre>curl -fsSL https://vishal-9878.github.io/dctl/dctl.gpg | sudo tee /usr/share/keyrings/dctl.gpg &gt;/dev/null
+echo "deb [signed-by=/usr/share/keyrings/dctl.gpg] https://vishal-9878.github.io/dctl/apt ./" | sudo tee /etc/apt/sources.list.d/dctl.list
+sudo apt update &amp;&amp; sudo apt install dctl</pre>

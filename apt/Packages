@@ -1,0 +1,23 @@
+Package: dctl
+Architecture: all
+Version: 0.4.10
+Priority: optional
+Section: admin
+Maintainer: Vishal Singh <vishal-9878@users.noreply.github.com>
+Installed-Size: 2832
+Depends: python3 (>= 3.8), openssh-client, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0
+Recommends: fzf
+Filename: ./dctl_0.4.10_all.deb
+Size: 688782
+MD5sum: 12e148c06c51505115a933bb3ab48615
+SHA1: ec4b301cc2601bf0afc2c63f5b8e0d410903418d
+SHA256: be9de3c4bff63b3bf97a1718132010471143252504b829efc6977e4937777c3b
+SHA512: 090345a7f23d22ea7405cc3be4a241e5dfc588fdec68a654bf02b493a10fbd04768f26834c660614db091cb924a6592abcd36260899ea00db9f259003f0c4229
+Homepage: https://github.com/vishal-9878/dctl
+Description: Agentless Docker & PM2 dashboard for many servers over SSH
+ dctl runs on your machine and manages Docker containers, compose files,
+ PM2 processes, files, disk space and systemd services on many servers.
+ The servers need nothing new: only SSH and the Docker / PM2 they already have.
+ Open "dctl" from the applications menu (or run "dctl-ui"), or use the
+ "dctl" command line tool.
+

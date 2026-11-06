@@ -1,0 +1,22 @@
+Codename: stable
+Date: Fri, 06 Nov 2026 11:42:43 +0000
+Description: dctl desktop app
+Label: dctl
+Origin: dctl
+Suite: stable
+MD5Sum:
+ 9a6b936e6e171238ff41463a02570907             1079 Packages
+ cea26c594ceadf7caee712c3459439d0              715 Packages.gz
+ 8307fcb2f89f3db2ce26fc774950478b              124 Release
+SHA1:
+ 00d1b804c9be41f8c2210ef4c045f5ca0972980b             1079 Packages
+ 8e9be9ab1a15455f5249960197b822b927eca178              715 Packages.gz
+ af3b81c04d4dda14308e80d7075eda1fb89c5aa2              124 Release
+SHA256:
+ f3bcf7081f3364961fbbdb8af064af2b9424e8507fb72aab072e180f37eeaa03             1079 Packages
+ 27bb5d046817f50534228371679d685f33fc5935644a105b60f4a26270f52b0f              715 Packages.gz
+ 74dd6df7bf995a7e7ef571825184e8e0405d5c5743bcf038144d818a0cbd7e9f              124 Release
+SHA512:
+ 92f894fff66a57c3886dfc492f2bee315acb362d94cb23ebd8bb005e564964eca620abf384a17e2a5e1cf262af39782c3fe0596c95d4364574a98a65f889ad4e             1079 Packages
+ 1138bacf426bcdc84e17085ed2c1b5d91c9184c3e4f4c10f499a801778fa91920516a063a8af6246c69b732bae369d1e89230da128bde2b69bdbb1728add14b3              715 Packages.gz
+ 655eccd6a484376928e59a62f640e86d313fcb96b83a8035a4bed7f5ce5723e4bbf3fabc589bca6e5e550d93db2b89f251bea873217e1f2c75773004539d4bbb              124 Release
